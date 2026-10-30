@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+      - name: Check formatting
+        run: zig fmt --check src
+      - name: Unit and fuzz tests (safety-checked build)
+        run: zig test src/main.zig -lc
+      - name: Build (ReleaseSafe)
+        run: zig build-exe src/main.zig -lc -O ReleaseSafe --name revdiff
+      - name: Smoke test
+        run: ./revdiff --help

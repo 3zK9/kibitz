@@ -1,5 +1,7 @@
 # revdiff
 
+[![ci](https://github.com/3zK9/revdiff/actions/workflows/ci.yml/badge.svg)](https://github.com/3zK9/revdiff/actions/workflows/ci.yml) [![security](https://github.com/3zK9/revdiff/actions/workflows/security.yml/badge.svg)](https://github.com/3zK9/revdiff/actions/workflows/security.yml)
+
 A vim-style terminal diff reviewer for code written by AI agents — and it talks back to
 your [Claude Code](https://claude.com/claude-code) session.
 
@@ -71,6 +73,20 @@ your session. In a plain terminal, just run `revdiff`; comments are saved to
 | `t` · `C` | ask Claude · show / hide the Claude panel |
 | `e` | open in `$EDITOR` at this line |
 | `z` · `r` · `?` · `q` | zoom pane · reload · help · quit |
+
+## Development
+
+```sh
+zig test src/main.zig -lc     # unit + fuzz tests, safety-checked
+zig fmt src                   # format
+./build.sh                    # release build + install
+```
+
+CI runs on macOS and Linux: format check, tests, and a ReleaseSafe build. The security
+workflow runs gitleaks (secrets), CodeQL and zizmor (GitHub Actions workflows) and
+ShellCheck on every push, PR, and weekly. There is no mainstream SAST engine for Zig yet,
+so the parsers that handle untrusted repo content are covered by randomized tests run
+with Zig's runtime safety checks enabled.
 
 ## License
 

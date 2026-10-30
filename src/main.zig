@@ -81,15 +81,16 @@ const ITAL: u8 = 2;
 const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8 }{
     .{ .title = "Move", .keys = &.{
         .{ "j k", "down / up  (counts work: 10j)" }, .{ "^d ^u  ^f ^b", "half page / page" },
-        .{ "gg G", "top / bottom" },                  .{ "{ }", "prev / next hunk" },
-        .{ "H L", "scroll sideways" },                .{ "/  n N", "search, next / prev" },
+        .{ "gg G", "top / bottom" },                 .{ "{ }", "prev / next hunk" },
+        .{ "H L", "scroll sideways" },               .{ "/  n N", "search, next / prev" },
     } },
     .{ .title = "Diff", .keys = &.{
         .{ "J K  Tab", "next / prev file" }, .{ "Enter", "open file in the browser at this line" },
         .{ "s", "toggle file list" },
     } },
     .{ .title = "Files", .keys = &.{
-        .{ "h l  ← →", "tree ⇄ file, collapse / expand" }, .{ "Enter", "open file or folder" },
+        .{ "h l  ← →", "tree ⇄ file, collapse / expand" },
+        .{ "Enter", "open file or folder" },
         .{ "J K  ] [", "next / prev changed file" },
     } },
     .{ .title = "Review", .keys = &.{
@@ -100,8 +101,11 @@ const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8
         .{ "t", "ask Claude something (opens panel)" }, .{ "C", "show / hide Claude panel" },
     } },
     .{ .title = "Other", .keys = &.{
-        .{ "f", "switch diff ⇄ files" }, .{ "e", "open in $EDITOR" }, .{ "r", "reload" },
-        .{ "z", "zoom pane" },           .{ "q", "quit" },
+        .{ "f", "switch diff ⇄ files" },
+        .{ "e", "open in $EDITOR" },
+        .{ "r", "reload" },
+        .{ "z", "zoom pane" },
+        .{ "q", "quit" },
     } },
 };
 
@@ -141,8 +145,8 @@ fn enterRaw() void {
     t.iflag.BRKINT = false;
     t.iflag.INPCK = false;
     t.iflag.ISTRIP = false;
-    t.cc[@intFromEnum(c.V.MIN)] = 0;
-    t.cc[@intFromEnum(c.V.TIME)] = 0;
+    t.cc[@backingInt(c.V.MIN)] = 0;
+    t.cc[@backingInt(c.V.TIME)] = 0;
     posix.tcsetattr(0, .FLUSH, t) catch {};
     writeAll(1, "\x1b[?1049h\x1b[?25l");
 }
@@ -651,17 +655,17 @@ const HKind = enum(u8) { kw, str, num, com, func, typ, punct };
 const HSpan = struct { s: u32, e: u32, k: HKind };
 
 const keywords = [_][]const u8{
-    "and",     "as",       "assert",     "async",      "await",     "break",    "case",    "catch",   "class",
-    "const",   "continue", "crate",      "def",        "default",   "defer",    "del",     "delete",  "do",
-    "elif",    "else",     "enum",       "except",     "export",    "extends",  "extern",  "false",   "False",
-    "final",   "finally",  "fn",         "for",        "from",      "func",     "function", "go",     "goto",
-    "if",      "impl",     "implements", "import",     "in",        "instanceof", "interface", "is",  "lambda",
-    "let",     "loop",     "match",      "mod",        "module",    "mut",      "new",     "nil",     "None",
-    "nonlocal", "not",     "null",       "or",         "package",   "pass",     "private", "protected", "pub",
-    "public",  "raise",    "readonly",   "return",     "self",      "Self",     "static",  "struct",  "super",
-    "switch",  "this",     "throw",      "throws",     "trait",     "true",     "True",    "try",     "type",
-    "typeof",  "unsafe",   "use",        "var",        "void",      "where",    "while",   "with",    "yield",
-    "pub",     "comptime", "orelse",     "undefined",  "errdefer",  "inline",   "usize",   "unreachable",
+    "and",      "as",       "assert",     "async",     "await",    "break",      "case",      "catch",       "class",
+    "const",    "continue", "crate",      "def",       "default",  "defer",      "del",       "delete",      "do",
+    "elif",     "else",     "enum",       "except",    "export",   "extends",    "extern",    "false",       "False",
+    "final",    "finally",  "fn",         "for",       "from",     "func",       "function",  "go",          "goto",
+    "if",       "impl",     "implements", "import",    "in",       "instanceof", "interface", "is",          "lambda",
+    "let",      "loop",     "match",      "mod",       "module",   "mut",        "new",       "nil",         "None",
+    "nonlocal", "not",      "null",       "or",        "package",  "pass",       "private",   "protected",   "pub",
+    "public",   "raise",    "readonly",   "return",    "self",     "Self",       "static",    "struct",      "super",
+    "switch",   "this",     "throw",      "throws",    "trait",    "true",       "True",      "try",         "type",
+    "typeof",   "unsafe",   "use",        "var",       "void",     "where",      "while",     "with",        "yield",
+    "pub",      "comptime", "orelse",     "undefined", "errdefer", "inline",     "usize",     "unreachable",
 };
 
 fn isKeyword(w: []const u8) bool {
@@ -2760,4 +2764,158 @@ pub fn main(init: std.process.Init) !u8 {
     };
     try app.run();
     return 0;
+}
+
+// ───────────────────────────────────────────── tests
+
+const testing = std.testing;
+
+const sample_diff =
+    \\diff --git a/src/app.py b/src/app.py
+    \\index 1111111..2222222 100644
+    \\--- a/src/app.py
+    \\+++ b/src/app.py
+    \\@@ -1,3 +1,4 @@ def main():
+    \\ import os
+    \\-x = compute(alpha, beta)
+    \\+x = compute(alpha, gamma)
+    \\+y = 2
+    \\ print(x)
+    \\diff --git a/new.ts b/new.ts
+    \\new file mode 100644
+    \\--- /dev/null
+    \\+++ b/new.ts
+    \\@@ -0,0 +1 @@
+    \\+export const a = 1;
+    \\diff --git a/old.md b/docs/new.md
+    \\similarity index 100%
+    \\rename from old.md
+    \\rename to docs/new.md
+    \\diff --git a/logo.png b/logo.png
+    \\Binary files a/logo.png and b/logo.png differ
+    \\
+;
+
+test "parseDiff: statuses, counts, line numbers and pairing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const files = try parseDiff(arena.allocator(), sample_diff);
+    try testing.expectEqual(@as(usize, 4), files.len);
+
+    const app = files[0];
+    try testing.expectEqualStrings("src/app.py", app.path);
+    try testing.expectEqual(@as(u8, 'M'), app.status);
+    try testing.expectEqual(@as(u32, 2), app.adds);
+    try testing.expectEqual(@as(u32, 1), app.dels);
+    const L = app.lines.items;
+    try testing.expectEqual(Kind.hunk, L[0].kind);
+    try testing.expectEqualStrings("def main():", L[0].text);
+    try testing.expectEqual(Kind.del, L[2].kind);
+    try testing.expectEqual(@as(u32, 2), L[2].old);
+    try testing.expectEqual(Kind.add, L[3].kind);
+    try testing.expectEqual(@as(u32, 2), L[3].new);
+    try testing.expectEqual(@as(u32, 3), L[4].new);
+    try testing.expectEqual(@as(u32, 3), L[2].pair); // -beta pairs with +gamma
+    try testing.expectEqual(@as(u32, 2), L[3].pair);
+    try testing.expectEqual(NONE, L[4].pair);
+
+    try testing.expectEqual(@as(u8, 'A'), files[1].status);
+    try testing.expectEqualStrings("new.ts", files[1].path);
+    try testing.expectEqual(@as(u8, 'R'), files[2].status);
+    try testing.expectEqualStrings("old.md", files[2].old_path);
+    try testing.expectEqualStrings("docs/new.md", files[2].path);
+    try testing.expectEqual(Kind.meta, files[3].lines.items[0].kind);
+}
+
+test "computeEmph marks only the changed word" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = "x = compute(alpha, beta)";
+    const b = "x = compute(alpha, gamma)";
+    const res = (try computeEmph(arena.allocator(), testing.allocator, a, b)).?;
+    try testing.expectEqual(@as(usize, 1), res[0].len);
+    try testing.expectEqualStrings("beta", a[res[0][0].s..res[0][0].e]);
+    try testing.expectEqualStrings("gamma", b[res[1][0].s..res[1][0].e]);
+    // unrelated lines are not worth highlighting
+    try testing.expect((try computeEmph(arena.allocator(), testing.allocator, "abc def", "totally different words here")) == null);
+}
+
+test "highlight finds keywords, strings, comments and functions" {
+    var spans: std.ArrayList(HSpan) = .empty;
+    defer spans.deinit(testing.allocator);
+    const line = "def greet(): return \"hi\"  # done";
+    try highlight(testing.allocator, line, .hash, &spans);
+    var seen: [7]bool = @splat(false);
+    for (spans.items) |sp| seen[@backingInt(sp.k)] = true;
+    try testing.expect(seen[@backingInt(HKind.kw)]);
+    try testing.expect(seen[@backingInt(HKind.func)]);
+    try testing.expect(seen[@backingInt(HKind.str)]);
+    try testing.expect(seen[@backingInt(HKind.com)]);
+    const last = spans.items[spans.items.len - 1];
+    try testing.expectEqualStrings("# done", line[last.s..last.e]);
+    try testing.expectEqual(Style.none, langStyle("README.md"));
+    try testing.expectEqual(Style.hash, langStyle("a/b/Makefile"));
+    try testing.expectEqual(Style.slash, langStyle("main.zig"));
+}
+
+test "cleanText expands tabs and neutralises control bytes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("    x", try cleanText(a, "\tx"));
+    try testing.expectEqualStrings("ab  c", try cleanText(a, "ab\tc"));
+    try testing.expectEqualStrings("a?b", try cleanText(a, "a\x1bb"));
+    try testing.expectEqualStrings("ok", try cleanText(a, "ok\r"));
+}
+
+test "utf-8 helpers" {
+    try testing.expectEqual(@as(u21, 'é'), decode("é").cp);
+    try testing.expectEqual(@as(u21, 0xFFFD), decode("\xff").cp);
+    try testing.expectEqual(@as(u21, 0xFFFD), decode("\xe2\x82").cp); // truncated sequence
+    try testing.expectEqual(@as(usize, 3), cpLen("a─b"));
+    try testing.expectEqualStrings("─b", tailCp("a─b", 2));
+    try testing.expectEqual(@as(u8, 16), to256(0x000000));
+    try testing.expectEqual(@as(u8, 196), to256(0xff0000));
+}
+
+test "fuzz: parsers survive arbitrary input" {
+    // Diffs, file names and file contents all come from the repo under review,
+    // so none of these may crash on hostile bytes. Run in a safety-checked build.
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const rand = prng.random();
+    const pieces = [_][]const u8{ "diff --git a/x b/y\n", "@@ -1,2 +3,4 @@ f\n", "@@\n", "+", "-", " ", "\\ No newline\n", "rename from \n", "+++ b/\n", "\t", "\n", "\xff\xfe", "é", "─", "\"", "'", "/*", "//", "#", "0x1f" };
+    var buf: [2048]u8 = undefined;
+    for (0..3000) |_| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var n: usize = 0;
+        while (n < buf.len - 64) {
+            if (rand.boolean()) {
+                const p = pieces[rand.uintLessThan(usize, pieces.len)];
+                @memcpy(buf[n..][0..p.len], p);
+                n += p.len;
+            } else {
+                const k = rand.uintLessThan(usize, 24);
+                rand.bytes(buf[n..][0..k]);
+                n += k;
+            }
+            if (rand.uintLessThan(u8, 40) == 0) break;
+        }
+        const input = buf[0..n];
+        const files = try parseDiff(a, input);
+        for (files) |*f| {
+            for (f.lines.items, 0..) |l, li| {
+                if (l.pair != NONE) _ = try computeEmph(a, testing.allocator, f.lines.items[li].text, f.lines.items[l.pair].text);
+            }
+        }
+        var spans: std.ArrayList(HSpan) = .empty;
+        inline for (.{ Style.hash, Style.slash, Style.dash }) |st| try highlight(a, input, st, &spans);
+        for (spans.items) |sp| try testing.expect(sp.s <= sp.e and sp.e <= input.len);
+        _ = try cleanText(a, input);
+        var i: usize = 0;
+        while (i < input.len) i += decode(input[i..]).len;
+        _ = tailCp(input, rand.uintLessThan(usize, 50));
+        _ = langStyle(input);
+    }
 }
