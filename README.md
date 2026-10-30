@@ -71,3 +71,7 @@ your session. In a plain terminal, just run `revdiff`; comments are saved to
 | `t` · `C` | ask Claude · show / hide the Claude panel |
 | `e` | open in `$EDITOR` at this line |
 | `z` · `r` · `?` · `q` | zoom pane · reload · help · quit |
+
+## License
+
+[Apache License 2.0](LICENSE)
