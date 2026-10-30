@@ -84,7 +84,7 @@ zig fmt src                   # format
 
 CI runs on macOS and Linux: format check, tests, and a ReleaseSafe build. The security
 workflow runs gitleaks (secrets), CodeQL and zizmor (GitHub Actions workflows) and
-ShellCheck on every push, PR, and weekly. There is no mainstream SAST engine for Zig yet,
+ShellCheck on every push, PR, and daily. There is no mainstream SAST engine for Zig yet,
 so the parsers that handle untrusted repo content are covered by randomized tests run
 with Zig's runtime safety checks enabled.
 
