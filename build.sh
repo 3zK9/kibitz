@@ -1,7 +1,7 @@
 #!/bin/sh
-# Build revdiff and install it to ~/.local/bin
+# Build kibitz and install it to ~/.local/bin
 set -e
 cd "$(dirname "$0")"
-zig build-exe src/main.zig -lc -O ReleaseFast --name revdiff
-install -m 755 revdiff "$HOME/.local/bin/revdiff"
-echo "installed $HOME/.local/bin/revdiff"
+zig build-exe src/main.zig -lc -O ReleaseFast --name kibitz
+install -m 755 kibitz "$HOME/.local/bin/kibitz"
+echo "installed $HOME/.local/bin/kibitz"

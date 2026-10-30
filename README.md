@@ -1,12 +1,12 @@
-# revdiff
+# kibitz
 
-[![ci](https://github.com/3zK9/revdiff/actions/workflows/ci.yml/badge.svg)](https://github.com/3zK9/revdiff/actions/workflows/ci.yml) [![security](https://github.com/3zK9/revdiff/actions/workflows/security.yml/badge.svg)](https://github.com/3zK9/revdiff/actions/workflows/security.yml)
+[![ci](https://github.com/3zK9/kibitz/actions/workflows/ci.yml/badge.svg)](https://github.com/3zK9/kibitz/actions/workflows/ci.yml) [![security](https://github.com/3zK9/kibitz/actions/workflows/security.yml/badge.svg)](https://github.com/3zK9/kibitz/actions/workflows/security.yml)
 
 A vim-style terminal diff reviewer for code written by AI agents — and it talks back to
 your [Claude Code](https://claude.com/claude-code) session.
 
 ```
- revdiff ── agent/add-coupons-and-rate-limit ← main   [diff] files   3 files  +26 -5
+ kibitz ── agent/add-coupons-and-rate-limit ← main   [diff] files   3 files  +26 -5
 ────────────────────────────────────────────────────────────────────────────────
   M src/orders.py  +7 -0 ─────────────────────────────────────────────────  2/3
         @@ -19 +19 @@ class Order:
@@ -32,15 +32,15 @@ into the Claude Code session that made the changes — without leaving the termi
 - **Talk to Claude** — `t` sends a message into your Claude Code session; a live panel shows
   Claude's replies while you keep reviewing.
 - **Live reload** — the diff refreshes every 2 seconds, so you can watch an agent work.
-- Untracked files are included; any `git diff` arguments work (`revdiff main`, `revdiff --cached`).
+- Untracked files are included; any `git diff` arguments work (`kibitz main`, `kibitz --cached`).
 
 ## Install
 
 Requires [Zig](https://ziglang.org) 0.17 (`brew install zig`) and macOS or Linux.
 
 ```sh
-git clone https://github.com/3zK9/revdiff && cd revdiff
-./build.sh        # builds and installs to ~/.local/bin/revdiff
+git clone https://github.com/3zK9/kibitz && cd kibitz
+./build.sh        # builds and installs to ~/.local/bin/kibitz
 ```
 
 ## Usage
@@ -48,14 +48,14 @@ git clone https://github.com/3zK9/revdiff && cd revdiff
 Inside Claude Code, from your repo:
 
 ```
-! revdiff          # HEAD + working tree
-! revdiff main     # everything since main
+! kibitz          # HEAD + working tree
+! kibitz main     # everything since main
 ```
 
-When run without a terminal (as Claude Code's `!` does), revdiff opens itself in a new pane
+When run without a terminal (as Claude Code's `!` does), kibitz opens itself in a new pane
 next to Claude using the Rex terminal's `rex` CLI, and links that pane to
-your session. In a plain terminal, just run `revdiff`; comments are saved to
-`.git/revdiff/` but can't be sent automatically.
+your session. In a plain terminal, just run `kibitz`; comments are saved to
+`.git/kibitz/` but can't be sent automatically.
 
 ## Keys
 

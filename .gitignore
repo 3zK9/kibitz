@@ -1,4 +1,4 @@
-revdiff
+kibitz
 *.o
 .zig-cache/
 zig-out/

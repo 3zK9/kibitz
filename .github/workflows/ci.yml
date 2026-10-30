@@ -28,6 +28,6 @@ jobs:
       - name: Unit and fuzz tests (safety-checked build)
         run: zig test src/main.zig -lc
       - name: Build (ReleaseSafe)
-        run: zig build-exe src/main.zig -lc -O ReleaseSafe --name revdiff
+        run: zig build-exe src/main.zig -lc -O ReleaseSafe --name kibitz
       - name: Smoke test
-        run: ./revdiff --help
+        run: ./kibitz --help

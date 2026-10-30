@@ -1,7 +1,7 @@
-//! revdiff: a vim-style git diff reviewer that talks back to Claude Code.
+//! kibitz: a vim-style git diff reviewer that talks back to Claude Code.
 //!
-//! From inside Claude Code type `! revdiff` (any `git diff` args work too, e.g.
-//! `! revdiff main`). It opens in a Rex pane next to Claude; comments you leave
+//! From inside Claude Code type `! kibitz` (any `git diff` args work too, e.g.
+//! `! kibitz main`). It opens in a Rex pane next to Claude; comments you leave
 //! get sent straight into the Claude Code session. Press ? inside for keys.
 
 const std = @import("std");
@@ -1527,7 +1527,7 @@ const App = struct {
         const right_len = 12 + 3 + r1.len + 2 + r2.len + 1 + r3.len + 1;
         const rx = w -| right_len;
 
-        var x = s.put(0, 1, "revdiff", P.accent, P.def, BOLD);
+        var x = s.put(0, 1, "kibitz", P.accent, P.def, BOLD);
         x = s.put(0, x, " ── ", P.faint, P.def, 0);
         var base_buf: [256]u8 = undefined;
         var base: []const u8 = "HEAD+worktree";
@@ -1903,7 +1903,7 @@ const App = struct {
         _ = s.put(top, w -| (hint.len + 1), hint, P.faint, P.def, 0);
         s.set(top, w - 1, '─', P.rule, P.def, 0);
         if (self.target == null) {
-            _ = s.put(top + 2, 2, "no Claude pane linked — launch with `! revdiff` from Claude Code", P.faint, P.def, 0);
+            _ = s.put(top + 2, 2, "no Claude pane linked — launch with `! kibitz` from Claude Code", P.faint, P.def, 0);
             return;
         }
         self.claude_mu.lockUncancelable(self.io);
@@ -2181,7 +2181,7 @@ const App = struct {
         const g = self.gpa;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(g);
-        try out.appendSlice(g, "# Code review feedback (from revdiff)\n\nAddress each comment below. Line numbers refer to the current working tree.\n\n");
+        try out.appendSlice(g, "# Code review feedback (from kibitz)\n\nAddress each comment below. Line numbers refer to the current working tree.\n\n");
         var i: usize = 0;
         for (self.comments.items) |cm| {
             if (cm.sent) continue;
@@ -2236,7 +2236,7 @@ const App = struct {
             return;
         }
         var mb: [1400]u8 = undefined;
-        const m = std.fmt.bufPrint(&mb, "I reviewed your changes in revdiff and left {d} comment(s) in {s} — read that file and address each comment.", .{ pending, path }) catch return;
+        const m = std.fmt.bufPrint(&mb, "I reviewed your changes in kibitz and left {d} comment(s) in {s} — read that file and address each comment.", .{ pending, path }) catch return;
         if (self.sendToClaude(m)) {
             self.markSent();
             self.setMsg("sent {d} comment(s) to Claude", .{pending});
@@ -2253,7 +2253,7 @@ const App = struct {
 
     fn talk(self: *App) void {
         if (self.target == null) {
-            self.setMsg("no Claude pane linked (launch with `! revdiff` from Claude Code)", .{});
+            self.setMsg("no Claude pane linked (launch with `! kibitz` from Claude Code)", .{});
             return;
         }
         self.panel.store(true, .release);
@@ -2265,9 +2265,9 @@ const App = struct {
         defer self.gpa.free(text);
         if (text.len == 0) return;
         const msg_text = (if (loc.len > 0)
-            std.fmt.allocPrint(self.gpa, "[from revdiff, looking at {s}] {s}", .{ locbuf[0..loc.len], text })
+            std.fmt.allocPrint(self.gpa, "[from kibitz, looking at {s}] {s}", .{ locbuf[0..loc.len], text })
         else
-            std.fmt.allocPrint(self.gpa, "[from revdiff] {s}", .{text})) catch return;
+            std.fmt.allocPrint(self.gpa, "[from kibitz] {s}", .{text})) catch return;
         defer self.gpa.free(msg_text);
         if (self.sendToClaude(msg_text)) self.setMsg("sent to Claude", .{}) else self.setMsg("send failed", .{});
     }
@@ -2639,10 +2639,10 @@ const App = struct {
 
 fn usage() void {
     printOut(
-        \\usage: revdiff [git diff args...] [--pane] [--no-zoom] [--target BLOCK]
+        \\usage: kibitz [git diff args...] [--pane] [--no-zoom] [--target BLOCK]
         \\
-        \\  A vim-style git diff reviewer. From Claude Code run `! revdiff` (or
-        \\  `! revdiff main`) to open it in a Rex pane next to Claude.
+        \\  A vim-style git diff reviewer. From Claude Code run `! kibitz` (or
+        \\  `! kibitz main`) to open it in a Rex pane next to Claude.
         \\
     , .{});
 }
@@ -2650,7 +2650,7 @@ fn usage() void {
 fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: ?[]const u8, revs: []const []const u8, no_zoom: bool, root: []const u8) !u8 {
     const block = env.get("REX_BLOCK");
     if (rex == null or block == null) {
-        printOut("revdiff needs a terminal. Run it in a terminal, or inside Rex so it can open a pane next to Claude.\n", .{});
+        printOut("kibitz needs a terminal. Run it in a terminal, or inside Rex so it can open a pane next to Claude.\n", .{});
         return 1;
     }
     const exe = try std.process.executablePathAlloc(io, gpa);
@@ -2659,16 +2659,16 @@ fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: 
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ rex.?, "split" });
     if (env.get("REX_SESSION")) |s| try argv.appendSlice(gpa, &.{ "-s", s });
-    try argv.appendSlice(gpa, &.{ "--json", "-b", block.?, "--split=right", "--ratio", "70", "-c", root, "--label", "revdiff", "--", exe, "--target", block.? });
+    try argv.appendSlice(gpa, &.{ "--json", "-b", block.?, "--split=right", "--ratio", "70", "-c", root, "--label", "kibitz", "--", exe, "--target", block.? });
     try argv.appendSlice(gpa, revs);
     if (no_zoom) try argv.append(gpa, "--no-zoom");
     const r = runCmd(gpa, io, argv.items) orelse {
-        printOut("revdiff: could not run rex\n", .{});
+        printOut("kibitz: could not run rex\n", .{});
         return 1;
     };
     defer gpa.free(r.out);
     if (!r.ok) {
-        printOut("revdiff: could not open a pane\n", .{});
+        printOut("kibitz: could not open a pane\n", .{});
         return 1;
     }
     if (!no_zoom) {
@@ -2684,7 +2684,7 @@ fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: 
             };
         }
     }
-    printOut("revdiff opened. Comments you send will arrive here.\n", .{});
+    printOut("kibitz opened. Comments you send will arrive here.\n", .{});
     return 0;
 }
 
@@ -2716,7 +2716,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     const top = runCmd(gpa, io, &.{ "git", "rev-parse", "--show-toplevel" });
     if (top == null or !top.?.ok) {
-        printErr("revdiff: not inside a git repository. cd into one first (e.g. `! cd ~/code/app && revdiff`).\n", .{});
+        printErr("kibitz: not inside a git repository. cd into one first (e.g. `! cd ~/code/app && kibitz`).\n", .{});
         return 1;
     }
     const root = mem.trimEnd(u8, top.?.out, "\n");
@@ -2726,7 +2726,7 @@ pub fn main(init: std.process.Init) !u8 {
     const rex = findInPath(gpa, io, env, "rex");
     if (pane or c.isatty(1) == 0) return launchPane(gpa, io, env, rex, revs.items, no_zoom, root);
     if (c.isatty(0) == 0) {
-        printErr("revdiff: stdin is not a terminal\n", .{});
+        printErr("kibitz: stdin is not a terminal\n", .{});
         return 1;
     }
 
@@ -2747,7 +2747,7 @@ pub fn main(init: std.process.Init) !u8 {
         .fv_arena = .init(gpa),
     };
     if (runCmd(gpa, io, &.{ "git", "rev-parse", "--absolute-git-dir" })) |r| {
-        app.review_dir = try std.fmt.allocPrint(gpa, "{s}/revdiff", .{mem.trimEnd(u8, r.out, "\n")});
+        app.review_dir = try std.fmt.allocPrint(gpa, "{s}/kibitz", .{mem.trimEnd(u8, r.out, "\n")});
         gpa.free(r.out);
     }
     if (runCmd(gpa, io, &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" })) |r| {
