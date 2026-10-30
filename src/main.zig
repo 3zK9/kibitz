@@ -98,7 +98,8 @@ const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8
         .{ "x", "delete comment" },                      .{ "S", "send all comments to Claude" },
     } },
     .{ .title = "Claude", .keys = &.{
-        .{ "t", "ask Claude something (opens panel)" }, .{ "C", "show / hide Claude panel" },
+        .{ "t", "talk to Claude about this line" },         .{ "C", "switch to Claude" },
+        .{ "", "click kibitz or `! kibitz` to come back" },
     } },
     .{ .title = "Other", .keys = &.{
         .{ "f", "switch diff ⇄ files" },
@@ -148,11 +149,11 @@ fn enterRaw() void {
     t.cc[@backingInt(c.V.MIN)] = 0;
     t.cc[@backingInt(c.V.TIME)] = 0;
     posix.tcsetattr(0, .FLUSH, t) catch {};
-    writeAll(1, "\x1b[?1049h\x1b[?25l");
+    writeAll(1, "\x1b[?1049h\x1b[?25l\x1b[?1004h");
 }
 
 fn leaveRaw() void {
-    writeAll(1, "\x1b[0m\x1b[?25h\x1b[?1049l");
+    writeAll(1, "\x1b[0m\x1b[?25h\x1b[?1004l\x1b[?1049l");
     if (orig_termios) |t| posix.tcsetattr(0, .FLUSH, t) catch {};
 }
 
@@ -322,6 +323,8 @@ const KEY_HOME: u32 = 0x110007;
 const KEY_END: u32 = 0x110008;
 const KEY_BTAB: u32 = 0x110009;
 const KEY_DEL: u32 = 0x11000A;
+/// The terminal reports that this pane got focus back (mode 1004).
+const KEY_FOCUS: u32 = 0x11000B;
 const KEY_ESC: u32 = 27;
 const KEY_ENTER: u32 = 13;
 const KEY_TAB: u32 = 9;
@@ -386,6 +389,7 @@ const Input = struct {
                     'H' => KEY_HOME,
                     'F' => KEY_END,
                     'Z' => KEY_BTAB,
+                    'I' => if (params.len == 0) KEY_FOCUS else 0,
                     '~' => if (mem.eql(u8, params, "5")) KEY_PGUP else if (mem.eql(u8, params, "6")) KEY_PGDN else if (mem.eql(u8, params, "3")) KEY_DEL else if (mem.eql(u8, params, "1") or mem.eql(u8, params, "7")) KEY_HOME else if (mem.eql(u8, params, "4") or mem.eql(u8, params, "8")) KEY_END else 0,
                     else => 0,
                 };
@@ -904,10 +908,8 @@ const App = struct {
     mode: Mode = .diff,
     focus: Focus = .tree,
     sidebar: bool = true,
-    panel: std.atomic.Value(bool) = .init(false),
-    quit: std.atomic.Value(bool) = .init(false),
-    claude_mu: Io.Mutex = .init,
-    claude_text: []u8 = &.{},
+    /// Zoom was turned off to show Claude; turn it back on when focus returns.
+    rezoom: bool = false,
     search: std.ArrayList(u8) = .empty,
     msg_buf: [512]u8 = undefined,
     msg_len: usize = 0,
@@ -1491,14 +1493,12 @@ const App = struct {
         const w = self.scr.w;
         const h = self.scr.h;
         if (h < 6 or w < 20) return;
-        const ph: usize = if (self.panel.load(.acquire)) @max(8, h * 2 / 5) else 0;
         const top: usize = 2;
-        const bh: usize = @max(1, h -| (3 + ph));
+        const bh: usize = @max(1, h -| 3);
         self.page = bh;
         self.drawHeader(w);
         self.hrule(1, 0, w, P.rule);
         if (self.mode == .diff) self.drawDiff(top, bh, w) else self.drawFiles(top, bh, w);
-        if (ph > 0) self.drawPanel(top + bh, ph, w);
         self.drawStatus(h - 1, w);
     }
 
@@ -1893,53 +1893,6 @@ const App = struct {
         if (v.rows.items.len == 0) _ = s.put(top + 1, x0 + 4, self.fv_note orelse "empty file", P.faint, P.def, ITAL);
     }
 
-    fn drawPanel(self: *App, top: usize, ph: usize, w: usize) void {
-        const s = &self.scr;
-        var x = s.put(top, 0, "──", P.rule, P.def, 0);
-        x = s.put(top, x, " ◆ claude ", P.claude, P.def, BOLD);
-        const hint = " t message · C close ";
-        var i = x;
-        while (i + hint.len + 1 < w) : (i += 1) s.set(top, i, '─', P.rule, P.def, 0);
-        _ = s.put(top, w -| (hint.len + 1), hint, P.faint, P.def, 0);
-        s.set(top, w - 1, '─', P.rule, P.def, 0);
-        if (self.target == null) {
-            _ = s.put(top + 2, 2, "no Claude pane linked — launch with `! kibitz` from Claude Code", P.faint, P.def, 0);
-            return;
-        }
-        self.claude_mu.lockUncancelable(self.io);
-        defer self.claude_mu.unlock(self.io);
-        const cw = @max(10, w -| 2);
-        // wrap the captured screen to the panel width, then show the tail
-        var wrapped: std.ArrayList([]const u8) = .empty;
-        defer wrapped.deinit(self.gpa);
-        var it = mem.splitScalar(u8, mem.trimEnd(u8, self.claude_text, "\n"), '\n');
-        while (it.next()) |raw_line| {
-            const line = mem.trimEnd(u8, raw_line, " ");
-            if (line.len == 0) {
-                wrapped.append(self.gpa, "") catch return;
-                continue;
-            }
-            var rest = line;
-            while (rest.len > 0) {
-                var b: usize = 0;
-                var n: usize = 0;
-                while (b < rest.len and n < cw) {
-                    b += decode(rest[b..]).len;
-                    n += 1;
-                }
-                wrapped.append(self.gpa, rest[0..b]) catch return;
-                rest = rest[b..];
-            }
-        }
-        const avail = ph - 1;
-        if (wrapped.items.len == 0) {
-            _ = s.put(top + 1, 2, "waiting for claude…", P.faint, P.def, ITAL);
-            return;
-        }
-        const start = wrapped.items.len -| avail;
-        for (wrapped.items[start..], 0..) |line, k| _ = s.put(top + 1 + k, 1, line, P.dim, P.def, 0);
-    }
-
     fn scrollPos(self: *App, buf: []u8) []const u8 {
         var cur: usize = 0;
         var n: usize = 0;
@@ -2240,7 +2193,7 @@ const App = struct {
         if (self.sendToClaude(m)) {
             self.markSent();
             self.setMsg("sent {d} comment(s) to Claude", .{pending});
-            self.panel.store(true, .release);
+            self.toClaude(null);
         } else {
             self.setMsg("send failed — comments saved to {s}", .{path});
         }
@@ -2251,25 +2204,41 @@ const App = struct {
         for (self.comments.items) |*cm| cm.sent = true;
     }
 
-    fn talk(self: *App) void {
-        if (self.target == null) {
+    /// Show the real Claude Code pane next to kibitz and move focus there.
+    /// `prefill` is typed into Claude's input without submitting it.
+    fn toClaude(self: *App, prefill: ?[]const u8) void {
+        const target = self.target orelse {
             self.setMsg("no Claude pane linked (launch with `! kibitz` from Claude Code)", .{});
             return;
+        };
+        if (self.zoomed) {
+            self.setZoom(false);
+            self.rezoom = true;
         }
-        self.panel.store(true, .release);
+        const r = self.rexRun("focus", &.{target}) orelse {
+            self.setMsg("could not switch to Claude", .{});
+            return;
+        };
+        self.gpa.free(r.out);
+        if (prefill) |text| if (self.rexRun("send", &.{ "-b", target, text })) |r2| self.gpa.free(r2.out);
+        self.setMsg("in Claude — click here or run `! kibitz` to come back", .{});
+    }
+
+    fn talk(self: *App) void {
         var lb: [600]u8 = undefined;
         const loc = self.location(&lb);
-        var locbuf: [600]u8 = undefined;
-        @memcpy(locbuf[0..loc.len], loc);
-        const text = self.prompt("claude", P.claude, "") orelse return;
-        defer self.gpa.free(text);
-        if (text.len == 0) return;
-        const msg_text = (if (loc.len > 0)
-            std.fmt.allocPrint(self.gpa, "[from kibitz, looking at {s}] {s}", .{ locbuf[0..loc.len], text })
-        else
-            std.fmt.allocPrint(self.gpa, "[from kibitz] {s}", .{text})) catch return;
-        defer self.gpa.free(msg_text);
-        if (self.sendToClaude(msg_text)) self.setMsg("sent to Claude", .{}) else self.setMsg("send failed", .{});
+        if (loc.len == 0) return self.toClaude(null);
+        var pb: [700]u8 = undefined;
+        const pre = std.fmt.bufPrint(&pb, "[looking at {s}] ", .{loc}) catch return self.toClaude(null);
+        self.toClaude(pre);
+    }
+
+    fn focusBack(self: *App) void {
+        self.scr.force = true;
+        if (self.rezoom) {
+            self.rezoom = false;
+            self.setZoom(true);
+        }
     }
 
     fn setZoom(self: *App, on: bool) void {
@@ -2492,7 +2461,8 @@ const App = struct {
             't' => self.talk(),
             'S' => self.sendAll(),
             'e' => self.openEditor(),
-            'C' => self.panel.store(!self.panel.load(.acquire), .release),
+            'C' => self.toClaude(null),
+            KEY_FOCUS => self.focusBack(),
             'z' => self.setZoom(!self.zoomed),
             'r' => if (try self.reload(true)) self.setMsg("reloaded", .{}) else self.setMsg("no changes", .{}),
             'g' => self.pending_g = true,
@@ -2565,9 +2535,7 @@ const App = struct {
             'L', KEY_RIGHT => v.hscroll += 8 * count,
             'H', KEY_LEFT => v.hscroll -|= 8 * count,
             'v' => v.sel = if (v.sel != null) null else v.cursor,
-            KEY_ESC => if (v.sel != null) {
-                v.sel = null;
-            } else self.panel.store(false, .release),
+            KEY_ESC => v.sel = null,
             'c' => try self.addComment(v),
             'x' => try self.deleteComment(v),
             else => {},
@@ -2591,7 +2559,6 @@ const App = struct {
             KEY_TAB => if (self.fv_open) {
                 self.focus = .viewer;
             },
-            KEY_ESC => self.panel.store(false, .release),
             'l', KEY_ENTER, '\n', KEY_RIGHT, ' ' => {
                 if (n == 0) return;
                 const node = self.nodes.items[rows[self.t_cursor].node];
@@ -2619,20 +2586,6 @@ const App = struct {
             else => {},
         }
     }
-
-    fn captureLoop(self: *App) void {
-        while (!self.quit.load(.acquire)) {
-            if (self.panel.load(.acquire)) if (self.target) |t| {
-                if (self.rexRun("capture", &.{ "-b", t, "--trim", "--unwrap" })) |r| {
-                    self.claude_mu.lockUncancelable(self.io);
-                    self.gpa.free(self.claude_text);
-                    self.claude_text = r.out;
-                    self.claude_mu.unlock(self.io);
-                }
-            };
-            self.io.sleep(Io.Duration.fromMilliseconds(500), .awake) catch {};
-        }
-    }
 };
 
 // ───────────────────────────────────────────── entry
@@ -2647,11 +2600,62 @@ fn usage() void {
     , .{});
 }
 
+/// Run a rex subcommand in this session, ignoring the result.
+fn rexCmd(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: []const u8, args: []const []const u8) void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    argv.appendSlice(gpa, &.{ rex, args[0] }) catch return;
+    if (env.get("REX_SESSION")) |s| argv.appendSlice(gpa, &.{ "-s", s }) catch return;
+    argv.appendSlice(gpa, args[1..]) catch return;
+    if (runCmd(gpa, io, argv.items)) |r| gpa.free(r.out);
+}
+
+/// ID of a block in this session with exactly this label. Caller owns the result.
+fn findBlock(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: []const u8, label: []const u8) ?[]u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    argv.appendSlice(gpa, &.{ rex, "block", "ls", "--json" }) catch return null;
+    if (env.get("REX_SESSION")) |s| argv.appendSlice(gpa, &.{ "-s", s }) catch return null;
+    const r = runCmd(gpa, io, argv.items) orelse return null;
+    defer gpa.free(r.out);
+    if (!r.ok) return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, r.out, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return null,
+    };
+    const blocks = root.get("blocks") orelse return null;
+    if (blocks != .array) return null;
+    for (blocks.array.items) |b| {
+        if (b != .object) continue;
+        const l = b.object.get("label") orelse continue;
+        const id = b.object.get("block_id") orelse continue;
+        if (l == .string and id == .string and mem.eql(u8, l.string, label)) return gpa.dupe(u8, id.string) catch null;
+    }
+    return null;
+}
+
 fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: ?[]const u8, revs: []const []const u8, no_zoom: bool, root: []const u8) !u8 {
     const block = env.get("REX_BLOCK");
     if (rex == null or block == null) {
         printOut("kibitz needs a terminal. Run it in a terminal, or inside Rex so it can open a pane next to Claude.\n", .{});
         return 1;
+    }
+    // label the pane by its revisions so `! kibitz` finds the same review again
+    var label: std.ArrayList(u8) = .empty;
+    defer label.deinit(gpa);
+    try label.appendSlice(gpa, "kibitz");
+    for (revs) |r| {
+        try label.append(gpa, ' ');
+        try label.appendSlice(gpa, r);
+    }
+    if (findBlock(gpa, io, env, rex.?, label.items)) |existing| {
+        defer gpa.free(existing);
+        if (!no_zoom) rexCmd(gpa, io, env, rex.?, &.{ "zoom", existing, "--on" });
+        rexCmd(gpa, io, env, rex.?, &.{ "focus", existing });
+        printOut("back in kibitz.\n", .{});
+        return 0;
     }
     const exe = try std.process.executablePathAlloc(io, gpa);
     defer gpa.free(exe);
@@ -2659,7 +2663,7 @@ fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: 
     defer argv.deinit(gpa);
     try argv.appendSlice(gpa, &.{ rex.?, "split" });
     if (env.get("REX_SESSION")) |s| try argv.appendSlice(gpa, &.{ "-s", s });
-    try argv.appendSlice(gpa, &.{ "--json", "-b", block.?, "--split=right", "--ratio", "70", "-c", root, "--label", "kibitz", "--", exe, "--target", block.? });
+    try argv.appendSlice(gpa, &.{ "--json", "-b", block.?, "--split=right", "--ratio", "55", "-c", root, "--label", label.items, "--", exe, "--target", block.? });
     try argv.appendSlice(gpa, revs);
     if (no_zoom) try argv.append(gpa, "--no-zoom");
     const r = runCmd(gpa, io, argv.items) orelse {
@@ -2674,13 +2678,7 @@ fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: 
     if (!no_zoom) {
         if (mem.indexOf(u8, r.out, "\"block_ids\"")) |i| {
             if (mem.indexOfScalarPos(u8, r.out, i + 11, '"')) |q1| if (mem.indexOfScalarPos(u8, r.out, q1 + 1, '"')) |q2| {
-                const nb = r.out[q1 + 1 .. q2];
-                var zargv: std.ArrayList([]const u8) = .empty;
-                defer zargv.deinit(gpa);
-                try zargv.appendSlice(gpa, &.{ rex.?, "zoom" });
-                if (env.get("REX_SESSION")) |s| try zargv.appendSlice(gpa, &.{ "-s", s });
-                try zargv.appendSlice(gpa, &.{ nb, "--on" });
-                if (runCmd(gpa, io, zargv.items)) |z| gpa.free(z.out);
+                rexCmd(gpa, io, env, rex.?, &.{ "zoom", r.out[q1 + 1 .. q2], "--on" });
             };
         }
     }
@@ -2757,11 +2755,6 @@ pub fn main(init: std.process.Init) !u8 {
 
     enterRaw();
     defer leaveRaw();
-    const th = std.Thread.spawn(.{}, App.captureLoop, .{&app}) catch null;
-    defer if (th) |t| {
-        app.quit.store(true, .release);
-        t.join();
-    };
     try app.run();
     return 0;
 }

@@ -29,8 +29,9 @@ into the Claude Code session that made the changes — without leaving the termi
   changed lines marked in the gutter.
 - **Review comments** — comment on a line or a visual selection; `S` writes them to a
   review file and tells Claude to address them.
-- **Talk to Claude** — `t` sends a message into your Claude Code session; a live panel shows
-  Claude's replies while you keep reviewing.
+- **Talk to Claude** — `t` puts the real Claude Code pane next to kibitz and focuses it,
+  with the line you're on already typed. Click back into kibitz (or run `! kibitz`) to keep
+  reviewing.
 - **Live reload** — the diff refreshes every 2 seconds, so you can watch an agent work.
 - Untracked files are included; any `git diff` arguments work (`kibitz main`, `kibitz --cached`).
 
@@ -70,7 +71,7 @@ your session. In a plain terminal, just run `kibitz`; comments are saved to
 | `h` `l` | (files) tree ⇄ file, collapse / expand |
 | `c` · `v` · `x` | comment · visual select · delete comment |
 | `S` | send all comments to Claude |
-| `t` · `C` | ask Claude · show / hide the Claude panel |
+| `t` · `C` | talk to Claude about this line · switch to Claude |
 | `e` | open in `$EDITOR` at this line |
 | `z` · `r` · `?` · `q` | zoom pane · reload · help · quit |
 
