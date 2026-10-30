@@ -1,0 +1,4 @@
+revdiff
+*.o
+.zig-cache/
+zig-out/
