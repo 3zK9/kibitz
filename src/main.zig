@@ -1,8 +1,9 @@
-//! kibitz: a vim-style git diff reviewer that talks back to Claude Code.
+//! kibitz: a vim-style git diff reviewer that talks back to your coding agent.
 //!
-//! From inside Claude Code type `! kibitz` (any `git diff` args work too, e.g.
-//! `! kibitz main`). It opens in a Rex pane next to Claude; comments you leave
-//! get sent straight into the Claude Code session. Press ? inside for keys.
+//! From inside Claude Code, Codex, Pi or Antigravity type `! kibitz` (any
+//! `git diff` args work too, e.g. `! kibitz main`). It opens in a Rex pane next
+//! to the agent; comments you leave get sent straight into that session. Press
+//! ? inside for keys.
 
 const std = @import("std");
 const Io = std.Io;
@@ -25,7 +26,6 @@ const P = struct {
     const rule: Col = 0x30363d;
     const accent: Col = 0x5af78e;
     const visual: Col = 0xd2a8ff;
-    const claude: Col = 0xd97757;
     const kw: Col = 0xff7b72;
     const str: Col = 0xa5d6ff;
     const num: Col = 0x79c0ff;
@@ -78,6 +78,52 @@ fn to256(col: Col) u8 {
 const BOLD: u8 = 1;
 const ITAL: u8 = 2;
 
+// ───────────────────────────────────────────── agents
+
+/// A coding agent kibitz can sit next to. All of them run `! cmd` as a shell
+/// command and submit on Enter; they differ in name, color and how fast they
+/// can take a typed line before Enter counts as a submit.
+const Agent = struct {
+    key: []const u8,
+    name: []const u8,
+    color: Col,
+    /// Process names that identify the agent in kibitz's ancestry.
+    procs: []const []const u8,
+    /// Pause between typing the message and pressing Enter.
+    submit_ms: u32 = 150,
+};
+
+const agents = [_]Agent{
+    .{ .key = "claude", .name = "Claude", .color = 0xd97757, .procs = &.{"claude"} },
+    // Codex treats keys that arrive in a burst as a paste, Enter included
+    .{ .key = "codex", .name = "Codex", .color = 0x9ad0c2, .procs = &.{"codex"}, .submit_ms = 400 },
+    .{ .key = "pi", .name = "Pi", .color = 0xc4a7e7, .procs = &.{"pi"} },
+    .{ .key = "agy", .name = "Antigravity", .color = 0x7aa2f7, .procs = &.{ "agy", "antigravity" } },
+};
+
+const generic_agent = Agent{ .key = "agent", .name = "the agent", .color = 0xa9b1d6, .procs = &.{} };
+
+fn agentByKey(key: []const u8) ?*const Agent {
+    for (&agents) |*a| {
+        if (std.ascii.eqlIgnoreCase(a.key, key) or std.ascii.eqlIgnoreCase(a.name, key)) return a;
+        for (a.procs) |pn| if (mem.eql(u8, pn, key)) return a;
+    }
+    return null;
+}
+
+/// Which agent a `ps` command line belongs to. Node-based agents show up as
+/// `node /path/to/pi`, so the script name is checked too.
+fn agentOfCommand(cmdline: []const u8) ?*const Agent {
+    var it = mem.tokenizeScalar(u8, cmdline, ' ');
+    for (0..2) |_| {
+        const tok = it.next() orelse return null;
+        const base = tok[if (mem.lastIndexOfScalar(u8, tok, '/')) |i| i + 1 else 0..];
+        for (&agents) |*a| for (a.procs) |pn| if (mem.eql(u8, base, pn)) return a;
+        if (!mem.eql(u8, base, "node") and !mem.eql(u8, base, "bun")) return null;
+    }
+    return null;
+}
+
 const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8 }{
     .{ .title = "Move", .keys = &.{
         .{ "j k", "down / up  (counts work: 10j)" }, .{ "^d ^u  ^f ^b", "half page / page" },
@@ -95,10 +141,10 @@ const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8
     } },
     .{ .title = "Review", .keys = &.{
         .{ "c", "comment on line or visual selection" }, .{ "v", "visual select" },
-        .{ "x", "delete comment" },                      .{ "S", "send all comments to Claude" },
+        .{ "x", "delete comment" },                      .{ "S", "send all comments to the agent" },
     } },
-    .{ .title = "Claude", .keys = &.{
-        .{ "t", "talk to Claude about this line" },         .{ "C", "switch to Claude" },
+    .{ .title = "Agent", .keys = &.{
+        .{ "t", "talk to the agent about this line" },      .{ "C", "switch to the agent" },
         .{ "", "click kibitz or `! kibitz` to come back" },
     } },
     .{ .title = "Other", .keys = &.{
@@ -908,7 +954,8 @@ const App = struct {
     mode: Mode = .diff,
     focus: Focus = .tree,
     sidebar: bool = true,
-    /// Zoom was turned off to show Claude; turn it back on when focus returns.
+    agent: *const Agent = &generic_agent,
+    /// Zoom was turned off to show the agent; turn it back on when focus returns.
     rezoom: bool = false,
     search: std.ArrayList(u8) = .empty,
     msg_buf: [512]u8 = undefined,
@@ -1921,8 +1968,8 @@ const App = struct {
         for (self.comments.items) |cm| {
             if (!cm.sent) unsent += 1;
         }
-        const diff_hints = [_][2][]const u8{ .{ "c", "comment" }, .{ "S", "send" }, .{ "t", "claude" }, .{ "f", "files" }, .{ "?", "help" } };
-        const file_hints = [_][2][]const u8{ .{ "⏎", "open" }, .{ "h/l", "pane" }, .{ "c", "comment" }, .{ "t", "claude" }, .{ "f", "diff" }, .{ "?", "help" } };
+        const diff_hints = [_][2][]const u8{ .{ "c", "comment" }, .{ "S", "send" }, .{ "t", self.agent.key }, .{ "f", "files" }, .{ "?", "help" } };
+        const file_hints = [_][2][]const u8{ .{ "⏎", "open" }, .{ "h/l", "pane" }, .{ "c", "comment" }, .{ "t", self.agent.key }, .{ "f", "diff" }, .{ "?", "help" } };
         const hints: []const [2][]const u8 = if (self.mode == .diff) &diff_hints else &file_hints;
         var ub: [32]u8 = undefined;
         const ustr = if (unsent > 0) std.fmt.bufPrint(&ub, "● {d} unsent", .{unsent}) catch "" else "";
@@ -1950,7 +1997,8 @@ const App = struct {
         if (unsent > 0) rx = s.put(y, rx, ustr, P.note, P.def, BOLD) + 3;
         for (hints[0..nh]) |hh| {
             rx = s.put(y, rx, hh[0], P.bright, P.def, BOLD);
-            rx = s.put(y, rx + 1, hh[1], P.faint, P.def, 0) + 2;
+            const linked = hh[1].ptr == self.agent.key.ptr and self.target != null;
+            rx = s.put(y, rx + 1, hh[1], if (linked) self.agent.color else P.faint, P.def, 0) + 2;
         }
         _ = s.put(y, w - pos.len - 1, pos, P.dim, P.def, 0);
     }
@@ -2108,7 +2156,7 @@ const App = struct {
             });
         }
         try self.rebuildViews();
-        self.setMsg("comment saved · S sends unsent comments to Claude", .{});
+        self.setMsg("comment saved · S sends unsent comments to {s}", .{self.agent.name});
     }
 
     fn deleteComment(self: *App, v: *View) !void {
@@ -2150,7 +2198,7 @@ const App = struct {
         return path;
     }
 
-    fn sendToClaude(self: *App, text: []const u8) bool {
+    fn sendToAgent(self: *App, text: []const u8) bool {
         const target = self.target orelse return false;
         // single line: a newline would submit early
         var line: std.ArrayList(u8) = .empty;
@@ -2163,7 +2211,7 @@ const App = struct {
         const r1 = self.rexRun("send", &.{ "-b", target, line.items }) orelse return false;
         self.gpa.free(r1.out);
         if (!r1.ok) return false;
-        self.io.sleep(Io.Duration.fromMilliseconds(150), .awake) catch {};
+        self.io.sleep(Io.Duration.fromMilliseconds(self.agent.submit_ms), .awake) catch {};
         const r2 = self.rexRun("send-key", &.{ "-b", target, "enter" }) orelse return false;
         self.gpa.free(r2.out);
         return r2.ok;
@@ -2185,15 +2233,15 @@ const App = struct {
         };
         if (self.target == null) {
             self.markSent();
-            self.setMsg("no Claude pane linked — saved {s}", .{path});
+            self.setMsg("no agent pane linked — saved {s}", .{path});
             return;
         }
         var mb: [1400]u8 = undefined;
         const m = std.fmt.bufPrint(&mb, "I reviewed your changes in kibitz and left {d} comment(s) in {s} — read that file and address each comment.", .{ pending, path }) catch return;
-        if (self.sendToClaude(m)) {
+        if (self.sendToAgent(m)) {
             self.markSent();
-            self.setMsg("sent {d} comment(s) to Claude", .{pending});
-            self.toClaude(null);
+            self.setMsg("sent {d} comment(s) to {s}", .{ pending, self.agent.name });
+            self.toAgent(null);
         } else {
             self.setMsg("send failed — comments saved to {s}", .{path});
         }
@@ -2204,11 +2252,11 @@ const App = struct {
         for (self.comments.items) |*cm| cm.sent = true;
     }
 
-    /// Show the real Claude Code pane next to kibitz and move focus there.
-    /// `prefill` is typed into Claude's input without submitting it.
-    fn toClaude(self: *App, prefill: ?[]const u8) void {
+    /// Show the agent's own pane next to kibitz and move focus there.
+    /// `prefill` is typed into the agent's input without submitting it.
+    fn toAgent(self: *App, prefill: ?[]const u8) void {
         const target = self.target orelse {
-            self.setMsg("no Claude pane linked (launch with `! kibitz` from Claude Code)", .{});
+            self.setMsg("no agent pane linked (launch with `! kibitz` from your agent)", .{});
             return;
         };
         if (self.zoomed) {
@@ -2216,21 +2264,21 @@ const App = struct {
             self.rezoom = true;
         }
         const r = self.rexRun("focus", &.{target}) orelse {
-            self.setMsg("could not switch to Claude", .{});
+            self.setMsg("could not switch to {s}", .{self.agent.name});
             return;
         };
         self.gpa.free(r.out);
         if (prefill) |text| if (self.rexRun("send", &.{ "-b", target, text })) |r2| self.gpa.free(r2.out);
-        self.setMsg("in Claude — click here or run `! kibitz` to come back", .{});
+        self.setMsg("in {s} — click here or run `! kibitz` to come back", .{self.agent.name});
     }
 
     fn talk(self: *App) void {
         var lb: [600]u8 = undefined;
         const loc = self.location(&lb);
-        if (loc.len == 0) return self.toClaude(null);
+        if (loc.len == 0) return self.toAgent(null);
         var pb: [700]u8 = undefined;
-        const pre = std.fmt.bufPrint(&pb, "[looking at {s}] ", .{loc}) catch return self.toClaude(null);
-        self.toClaude(pre);
+        const pre = std.fmt.bufPrint(&pb, "[looking at {s}] ", .{loc}) catch return self.toAgent(null);
+        self.toAgent(pre);
     }
 
     fn focusBack(self: *App) void {
@@ -2401,7 +2449,9 @@ const App = struct {
         var ub: [32]u8 = undefined;
         _ = s.put(y, 0, "▌", P.note, P.def, 0);
         var x = s.put(y, 1, std.fmt.bufPrint(&ub, "{d} unsent", .{unsent}) catch "", P.note, P.def, BOLD) + 3;
-        const opts = [_][2][]const u8{ .{ "s", "send to claude & quit" }, .{ "d", "discard & quit" }, .{ "any", "cancel" } };
+        var sb: [48]u8 = undefined;
+        const send = std.fmt.bufPrint(&sb, "send to {s} & quit", .{self.agent.key}) catch "send & quit";
+        const opts = [_][2][]const u8{ .{ "s", send }, .{ "d", "discard & quit" }, .{ "any", "cancel" } };
         for (opts) |o| {
             x = s.put(y, x, o[0], P.bright, P.def, BOLD);
             x = s.put(y, x + 1, o[1], P.faint, P.def, 0) + 3;
@@ -2461,7 +2511,7 @@ const App = struct {
             't' => self.talk(),
             'S' => self.sendAll(),
             'e' => self.openEditor(),
-            'C' => self.toClaude(null),
+            'C' => self.toAgent(null),
             KEY_FOCUS => self.focusBack(),
             'z' => self.setZoom(!self.zoomed),
             'r' => if (try self.reload(true)) self.setMsg("reloaded", .{}) else self.setMsg("no changes", .{}),
@@ -2592,97 +2642,202 @@ const App = struct {
 
 fn usage() void {
     printOut(
-        \\usage: kibitz [git diff args...] [--pane] [--no-zoom] [--target BLOCK]
+        \\usage: kibitz [git diff args...] [--pane] [--no-zoom] [--target BLOCK] [--agent NAME]
         \\
-        \\  A vim-style git diff reviewer. From Claude Code run `! kibitz` (or
-        \\  `! kibitz main`) to open it in a Rex pane next to Claude.
+        \\  A vim-style git diff reviewer. From Claude Code, Codex, Pi or Antigravity
+        \\  run `! kibitz` (or `! kibitz main`) to open it in a Rex pane next to
+        \\  the agent. The agent is detected; --agent claude|codex|pi|agy overrides.
         \\
     , .{});
 }
 
-/// Run a rex subcommand in this session, ignoring the result.
-fn rexCmd(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: []const u8, args: []const []const u8) void {
-    var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    argv.appendSlice(gpa, &.{ rex, args[0] }) catch return;
-    if (env.get("REX_SESSION")) |s| argv.appendSlice(gpa, &.{ "-s", s }) catch return;
-    argv.appendSlice(gpa, args[1..]) catch return;
-    if (runCmd(gpa, io, argv.items)) |r| gpa.free(r.out);
+/// Run a rex subcommand scoped to `session`, ignoring the result.
+fn rexCmd(gpa: Allocator, io: Io, rex: []const u8, session: []const u8, args: []const []const u8) void {
+    if (rexJson(gpa, io, rex, session, args)) |out| gpa.free(out);
 }
 
-/// ID of a block in this session with exactly this label. Caller owns the result.
-fn findBlock(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: []const u8, label: []const u8) ?[]u8 {
+/// Run a rex subcommand scoped to `session` and return its stdout on success.
+fn rexJson(gpa: Allocator, io: Io, rex: []const u8, session: ?[]const u8, args: []const []const u8) ?[]u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
-    argv.appendSlice(gpa, &.{ rex, "block", "ls", "--json" }) catch return null;
-    if (env.get("REX_SESSION")) |s| argv.appendSlice(gpa, &.{ "-s", s }) catch return null;
+    // `-s` goes after the full command name: `rex block ls -s S`, `rex zoom -s S`
+    const words: usize = for ([_][]const u8{ "block", "window", "session" }) |grp| {
+        if (mem.eql(u8, args[0], grp)) break 2;
+    } else 1;
+    argv.append(gpa, rex) catch return null;
+    argv.appendSlice(gpa, args[0..words]) catch return null;
+    if (session) |s| argv.appendSlice(gpa, &.{ "-s", s }) catch return null;
+    argv.appendSlice(gpa, args[words..]) catch return null;
     const r = runCmd(gpa, io, argv.items) orelse return null;
+    if (!r.ok) {
+        gpa.free(r.out);
+        return null;
+    }
+    return r.out;
+}
+
+fn jsonGet(v: std.json.Value, key: []const u8) ?std.json.Value {
+    return if (v == .object) v.object.get(key) else null;
+}
+
+fn jsonStr(v: std.json.Value, key: []const u8) ?[]const u8 {
+    const x = jsonGet(v, key) orelse return null;
+    return if (x == .string) x.string else null;
+}
+
+fn jsonArr(v: std.json.Value, key: []const u8) []const std.json.Value {
+    const x = jsonGet(v, key) orelse return &.{};
+    return if (x == .array) x.array.items else &.{};
+}
+
+/// The pane the agent runs in. Strings live in the arena.
+const AgentPane = struct { session: []const u8, block: []const u8, agent: *const Agent };
+
+/// kibitz's ancestor pids, nearest first.
+fn ancestors(gpa: Allocator, io: Io, buf: []c.pid_t) []c.pid_t {
+    var n: usize = 0;
+    var pid: c.pid_t = c.getppid();
+    while (n < buf.len and pid > 1) {
+        buf[n] = pid;
+        n += 1;
+        var pb: [16]u8 = undefined;
+        const ps = std.fmt.bufPrint(&pb, "{d}", .{pid}) catch break;
+        const r = runCmd(gpa, io, &.{ "ps", "-o", "ppid=", "-p", ps }) orelse break;
+        defer gpa.free(r.out);
+        pid = std.fmt.parseInt(c.pid_t, mem.trim(u8, r.out, " \n"), 10) catch break;
+    }
+    return buf[0..n];
+}
+
+/// Which agent a pane's foreground process is, from Rex's `process` method.
+fn agentOfProcess(gpa: Allocator, io: Io, fg: std.json.Value) ?*const Agent {
+    for ([_][]const u8{ "argv0", "invoked_path", "path", "name" }) |key| {
+        if (jsonStr(fg, key)) |p| if (agentOfCommand(p)) |a| return a;
+    }
+    // node/bun scripts (pi) only show up in the full command line
+    const pid = jsonGet(fg, "pid") orelse return null;
+    if (pid != .integer) return null;
+    var pb: [24]u8 = undefined;
+    const ps = std.fmt.bufPrint(&pb, "{d}", .{pid.integer}) catch return null;
+    const r = runCmd(gpa, io, &.{ "ps", "-o", "command=", "-p", ps }) orelse return null;
     defer gpa.free(r.out);
-    if (!r.ok) return null;
-    const parsed = std.json.parseFromSlice(std.json.Value, gpa, r.out, .{}) catch return null;
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |o| o,
-        else => return null,
-    };
-    const blocks = root.get("blocks") orelse return null;
-    if (blocks != .array) return null;
-    for (blocks.array.items) |b| {
-        if (b != .object) continue;
-        const l = b.object.get("label") orelse continue;
-        const id = b.object.get("block_id") orelse continue;
-        if (l == .string and id == .string and mem.eql(u8, l.string, label)) return gpa.dupe(u8, id.string) catch null;
+    return agentOfCommand(mem.trim(u8, r.out, " \n"));
+}
+
+/// Find the agent pane `! kibitz` was typed into. REX_BLOCK can't be trusted:
+/// Codex runs `!` commands in a long-lived daemon that keeps the environment
+/// of whichever pane started it. So look at every terminal pane's foreground
+/// process and prefer, in order: an agent that is our own ancestor, then the
+/// focused pane of the active window, then one working in this repo.
+fn findAgentPane(arena: Allocator, io: Io, rex: []const u8, root: []const u8, want: ?*const Agent) ?AgentPane {
+    var pid_buf: [32]c.pid_t = undefined;
+    const anc = ancestors(arena, io, &pid_buf);
+    const sessions_out = rexJson(arena, io, rex, null, &.{ "ls", "--json" }) orelse return null;
+    const sessions = std.json.parseFromSliceLeaky(std.json.Value, arena, sessions_out, .{}) catch return null;
+    var best: ?AgentPane = null;
+    var best_score: i32 = -1;
+    for (jsonArr(sessions, "sessions")) |sv| {
+        const sid = jsonStr(sv, "session_id") orelse continue;
+        var focused: []const u8 = "";
+        if (rexJson(arena, io, rex, sid, &.{ "window", "ls", "--json" })) |out| {
+            const wl = std.json.parseFromSliceLeaky(std.json.Value, arena, out, .{}) catch null;
+            if (wl) |w| {
+                const active = jsonStr(w, "active_window_id") orelse "";
+                for (jsonArr(w, "windows")) |win| {
+                    if (mem.eql(u8, jsonStr(win, "window_id") orelse "", active)) focused = jsonStr(win, "focused_block_id") orelse "";
+                }
+            }
+        }
+        const bl_out = rexJson(arena, io, rex, sid, &.{ "block", "ls", "--json" }) orelse continue;
+        const bl = std.json.parseFromSliceLeaky(std.json.Value, arena, bl_out, .{}) catch continue;
+        for (jsonArr(bl, "blocks")) |bv| {
+            const bid = jsonStr(bv, "block_id") orelse continue;
+            if (mem.indexOf(u8, jsonStr(bv, "flavor") orelse "", "terminal") == null) continue;
+            const pout = rexJson(arena, io, rex, sid, &.{ "block", "call", "-b", bid, "process" }) orelse continue;
+            const pv = std.json.parseFromSliceLeaky(std.json.Value, arena, pout, .{}) catch continue;
+            const fg = jsonGet(pv, "foreground") orelse continue;
+            const agent = agentOfProcess(arena, io, fg) orelse continue;
+            if (want) |w| if (w != agent) continue;
+            var score: i32 = 0;
+            if (jsonGet(fg, "pid")) |p| if (p == .integer) {
+                for (anc) |a| if (a == p.integer) {
+                    score += 100;
+                };
+            };
+            if (mem.eql(u8, bid, focused)) score += 10;
+            if (jsonStr(fg, "cwd")) |cwd| if (mem.startsWith(u8, root, cwd)) {
+                score += 1;
+            };
+            if (score > best_score) {
+                best_score = score;
+                best = .{ .session = sid, .block = bid, .agent = agent };
+            }
+        }
+    }
+    return best;
+}
+
+/// ID of a block in `session` with exactly this label. Lives in the arena.
+fn findBlock(arena: Allocator, io: Io, rex: []const u8, session: []const u8, label: []const u8) ?[]const u8 {
+    const out = rexJson(arena, io, rex, session, &.{ "block", "ls", "--json" }) orelse return null;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, arena, out, .{}) catch return null;
+    for (jsonArr(v, "blocks")) |b| {
+        if (mem.eql(u8, jsonStr(b, "label") orelse "", label)) return jsonStr(b, "block_id");
     }
     return null;
 }
 
-fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex: ?[]const u8, revs: []const []const u8, no_zoom: bool, root: []const u8) !u8 {
-    const block = env.get("REX_BLOCK");
-    if (rex == null or block == null) {
-        printOut("kibitz needs a terminal. Run it in a terminal, or inside Rex so it can open a pane next to Claude.\n", .{});
+fn launchPane(gpa: Allocator, io: Io, env: *const std.process.Environ.Map, rex_opt: ?[]const u8, revs: []const []const u8, no_zoom: bool, root: []const u8, agent_arg: ?[]const u8) !u8 {
+    const rex = rex_opt orelse {
+        printOut("kibitz needs a terminal. Run it in a terminal, or inside Rex so it can open a pane next to your agent.\n", .{});
         return 1;
-    }
+    };
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const want: ?*const Agent = if (agent_arg) |a| agentByKey(a) else null;
+    const pane: AgentPane = findAgentPane(arena, io, rex, root, want) orelse blk: {
+        // no agent found: fall back to whatever pane we were started from
+        const block = env.get("REX_BLOCK") orelse "";
+        const session = env.get("REX_SESSION") orelse "";
+        if (block.len == 0 or session.len == 0) {
+            printOut("kibitz: could not find your agent's pane. Run it from Claude Code, Codex, Pi or Antigravity inside Rex.\n", .{});
+            return 1;
+        }
+        break :blk .{ .session = session, .block = block, .agent = want orelse &generic_agent };
+    };
     // label the pane by its revisions so `! kibitz` finds the same review again
     var label: std.ArrayList(u8) = .empty;
-    defer label.deinit(gpa);
-    try label.appendSlice(gpa, "kibitz");
+    try label.appendSlice(arena, "kibitz");
     for (revs) |r| {
-        try label.append(gpa, ' ');
-        try label.appendSlice(gpa, r);
+        try label.append(arena, ' ');
+        try label.appendSlice(arena, r);
     }
-    if (findBlock(gpa, io, env, rex.?, label.items)) |existing| {
-        defer gpa.free(existing);
-        if (!no_zoom) rexCmd(gpa, io, env, rex.?, &.{ "zoom", existing, "--on" });
-        rexCmd(gpa, io, env, rex.?, &.{ "focus", existing });
+    if (findBlock(arena, io, rex, pane.session, label.items)) |existing| {
+        if (!no_zoom) rexCmd(arena, io, rex, pane.session, &.{ "zoom", existing, "--on" });
+        rexCmd(arena, io, rex, pane.session, &.{ "focus", existing });
         printOut("back in kibitz.\n", .{});
         return 0;
     }
-    const exe = try std.process.executablePathAlloc(io, gpa);
-    defer gpa.free(exe);
+    const exe = try std.process.executablePathAlloc(io, arena);
     var argv: std.ArrayList([]const u8) = .empty;
-    defer argv.deinit(gpa);
-    try argv.appendSlice(gpa, &.{ rex.?, "split" });
-    if (env.get("REX_SESSION")) |s| try argv.appendSlice(gpa, &.{ "-s", s });
-    try argv.appendSlice(gpa, &.{ "--json", "-b", block.?, "--split=right", "--ratio", "55", "-c", root, "--label", label.items, "--", exe, "--target", block.? });
-    try argv.appendSlice(gpa, revs);
-    if (no_zoom) try argv.append(gpa, "--no-zoom");
-    const r = runCmd(gpa, io, argv.items) orelse {
-        printOut("kibitz: could not run rex\n", .{});
-        return 1;
-    };
-    defer gpa.free(r.out);
-    if (!r.ok) {
+    try argv.appendSlice(arena, &.{ "split", "--json", "-b", pane.block, "--split=right", "--ratio", "55", "-c", root, "--label", label.items, "--", exe, "--target", pane.block, "--session", pane.session });
+    if (pane.agent != &generic_agent) try argv.appendSlice(arena, &.{ "--agent", pane.agent.key });
+    try argv.appendSlice(arena, revs);
+    if (no_zoom) try argv.append(arena, "--no-zoom");
+    const out = rexJson(arena, io, rex, pane.session, argv.items) orelse {
         printOut("kibitz: could not open a pane\n", .{});
         return 1;
-    }
+    };
     if (!no_zoom) {
-        if (mem.indexOf(u8, r.out, "\"block_ids\"")) |i| {
-            if (mem.indexOfScalarPos(u8, r.out, i + 11, '"')) |q1| if (mem.indexOfScalarPos(u8, r.out, q1 + 1, '"')) |q2| {
-                rexCmd(gpa, io, env, rex.?, &.{ "zoom", r.out[q1 + 1 .. q2], "--on" });
+        // the new block is the first ID under "block_ids", however deep it sits
+        if (mem.indexOf(u8, out, "\"block_ids\"")) |i| {
+            if (mem.indexOfScalarPos(u8, out, i + 11, '"')) |q1| if (mem.indexOfScalarPos(u8, out, q1 + 1, '"')) |q2| {
+                rexCmd(arena, io, rex, pane.session, &.{ "zoom", out[q1 + 1 .. q2], "--on" });
             };
         }
     }
-    printOut("kibitz opened. Comments you send will arrive here.\n", .{});
+    printOut("kibitz opened next to {s}. Comments you send will arrive here.\n", .{pane.agent.name});
     return 0;
 }
 
@@ -2695,11 +2850,21 @@ pub fn main(init: std.process.Init) !u8 {
     var target: ?[]const u8 = null;
     var pane = false;
     var no_zoom = false;
+    var agent_arg: ?[]const u8 = null;
+    var session_arg: ?[]const u8 = null;
     var it = init.minimal.args.iterate();
     _ = it.next();
     while (it.next()) |arg| {
         if (mem.eql(u8, arg, "--target")) {
             target = it.next();
+        } else if (mem.eql(u8, arg, "--session")) {
+            session_arg = it.next();
+        } else if (mem.eql(u8, arg, "--agent")) {
+            agent_arg = it.next();
+            if (agent_arg == null or agentByKey(agent_arg.?) == null) {
+                printErr("kibitz: --agent takes one of claude, codex, pi, agy\n", .{});
+                return 2;
+            }
         } else if (mem.eql(u8, arg, "--pane")) {
             pane = true;
         } else if (mem.eql(u8, arg, "--no-zoom")) {
@@ -2722,7 +2887,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (c.chdir(root_z) != 0) return 1; // diff paths are repo-relative
 
     const rex = findInPath(gpa, io, env, "rex");
-    if (pane or c.isatty(1) == 0) return launchPane(gpa, io, env, rex, revs.items, no_zoom, root);
+    if (pane or c.isatty(1) == 0) return launchPane(gpa, io, env, rex, revs.items, no_zoom, root, agent_arg);
     if (c.isatty(0) == 0) {
         printErr("kibitz: stdin is not a terminal\n", .{});
         return 1;
@@ -2733,7 +2898,8 @@ pub fn main(init: std.process.Init) !u8 {
         .io = io,
         .revs = revs.items,
         .target = target,
-        .session = env.get("REX_SESSION"),
+        .agent = if (agent_arg) |a| agentByKey(a).? else &generic_agent,
+        .session = session_arg orelse env.get("REX_SESSION"),
         .own_block = env.get("REX_BLOCK"),
         .rex = rex,
         .zoomed = target != null and !no_zoom,
@@ -2911,4 +3077,15 @@ test "fuzz: parsers survive arbitrary input" {
         _ = tailCp(input, rand.uintLessThan(usize, 50));
         _ = langStyle(input);
     }
+}
+
+test "agents are recognised from ps command lines" {
+    try testing.expectEqualStrings("claude", agentOfCommand("claude --resume").?.key);
+    try testing.expectEqualStrings("codex", agentOfCommand("/opt/homebrew/bin/codex").?.key);
+    try testing.expectEqualStrings("pi", agentOfCommand("node /usr/local/lib/node_modules/.bin/pi").?.key);
+    try testing.expectEqualStrings("agy", agentOfCommand("/Users/me/.local/bin/agy").?.key);
+    try testing.expect(agentOfCommand("/bin/zsh -c kibitz") == null);
+    try testing.expect(agentOfCommand("node server.js") == null);
+    try testing.expectEqualStrings("agy", agentByKey("antigravity").?.key);
+    try testing.expectEqualStrings("agy", agentByKey("Antigravity").?.key);
 }

@@ -3,7 +3,8 @@
 [![ci](https://github.com/3zK9/kibitz/actions/workflows/ci.yml/badge.svg)](https://github.com/3zK9/kibitz/actions/workflows/ci.yml) [![security](https://github.com/3zK9/kibitz/actions/workflows/security.yml/badge.svg)](https://github.com/3zK9/kibitz/actions/workflows/security.yml)
 
 A vim-style terminal diff reviewer for code written by AI agents — and it talks back to
-your [Claude Code](https://claude.com/claude-code) session.
+the agent: [Claude Code](https://claude.com/claude-code), [Codex CLI](https://github.com/openai/codex),
+[Pi](https://pi.dev) or [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) (`agy`).
 
 ```
  kibitz ── agent/add-coupons-and-rate-limit ← main   [diff] files   3 files  +26 -5
@@ -19,7 +20,7 @@ your [Claude Code](https://claude.com/claude-code) session.
 ```
 
 Review every changed file with vim keys, leave comments on lines, and send them straight
-into the Claude Code session that made the changes — without leaving the terminal.
+into the agent session that made the changes — without leaving the terminal.
 
 ## Features
 
@@ -28,8 +29,8 @@ into the Claude Code session that made the changes — without leaving the termi
 - **File browser** — a `tree`-style view of the whole repo; open any file read-only with
   changed lines marked in the gutter.
 - **Review comments** — comment on a line or a visual selection; `S` writes them to a
-  review file and tells Claude to address them.
-- **Talk to Claude** — `t` puts the real Claude Code pane next to kibitz and focuses it,
+  review file and tells the agent to address them.
+- **Talk to your agent** — `t` puts the agent's own pane next to kibitz and focuses it,
   with the line you're on already typed. Click back into kibitz (or run `! kibitz`) to keep
   reviewing.
 - **Live reload** — the diff refreshes every 2 seconds, so you can watch an agent work.
@@ -46,16 +47,24 @@ git clone https://github.com/3zK9/kibitz && cd kibitz
 
 ## Usage
 
-Inside Claude Code, from your repo:
+Inside your agent, from your repo (all four run `!` lines as shell commands):
 
 ```
 ! kibitz          # HEAD + working tree
 ! kibitz main     # everything since main
 ```
 
-When run without a terminal (as Claude Code's `!` does), kibitz opens itself in a new pane
-next to Claude using the Rex terminal's `rex` CLI, and links that pane to
-your session. In a plain terminal, just run `kibitz`; comments are saved to
+| Agent | Detected as | Notes |
+|---|---|---|
+| Claude Code | `claude` | |
+| Codex CLI | `codex` | works with Codex's background daemon, which runs `!` commands outside your pane |
+| Pi | `pi` | |
+| Antigravity CLI | `agy` | |
+
+When run without a terminal (as `!` does), kibitz finds the pane your agent is running in
+and opens itself next to it using the Rex terminal's `rex` CLI. The agent is detected from
+the running processes; pass `--agent claude|codex|pi|agy` to pick one yourself. Running
+`! kibitz` again jumps back to the open review instead of starting a new one. In a plain terminal, just run `kibitz`; comments are saved to
 `.git/kibitz/` but can't be sent automatically.
 
 ## Keys
@@ -70,8 +79,8 @@ your session. In a plain terminal, just run `kibitz`; comments are saved to
 | `Enter` / `f` | open the file in the browser · switch diff ⇄ files |
 | `h` `l` | (files) tree ⇄ file, collapse / expand |
 | `c` · `v` · `x` | comment · visual select · delete comment |
-| `S` | send all comments to Claude |
-| `t` · `C` | talk to Claude about this line · switch to Claude |
+| `S` | send all comments to the agent |
+| `t` · `C` | talk to the agent about this line · switch to the agent |
 | `e` | open in `$EDITOR` at this line |
 | `z` · `r` · `?` · `q` | zoom pane · reload · help · quit |
 
