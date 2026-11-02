@@ -77,6 +77,12 @@ fn to256(col: Col) u8 {
 
 const BOLD: u8 = 1;
 const ITAL: u8 = 2;
+const UNDER: u8 = 4;
+const REV: u8 = 8;
+const DIM: u8 = 16;
+const STRIKE: u8 = 32;
+/// Colors with this tag are terminal palette indices (low byte), not RGB.
+const PAL: Col = 0xFE000000;
 
 // ───────────────────────────────────────────── agents
 
@@ -144,8 +150,8 @@ const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8
         .{ "x", "delete comment" },                      .{ "S", "send all comments to the agent" },
     } },
     .{ .title = "Agent", .keys = &.{
-        .{ "t", "talk to the agent about this line" },      .{ "C", "switch to the agent" },
-        .{ "", "click kibitz or `! kibitz` to come back" },
+        .{ "t", "talk to the agent about this line" }, .{ "i", "type to the agent" },
+        .{ "C", "show / hide the agent panel" },       .{ "^]", "back to the diff (or click it)" },
     } },
     .{ .title = "Other", .keys = &.{
         .{ "f", "switch diff ⇄ files" },
@@ -199,7 +205,7 @@ fn enterRaw() void {
 }
 
 fn leaveRaw() void {
-    writeAll(1, "\x1b[0m\x1b[?25h\x1b[?1004l\x1b[?1049l");
+    writeAll(1, "\x1b[0m\x1b[?25h\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b[=0;1u\x1b[>4;0m\x1b[?1049l");
     if (orig_termios) |t| posix.tcsetattr(0, .FLUSH, t) catch {};
 }
 
@@ -308,6 +314,7 @@ const Screen = struct {
 
     fn sgrColor(s: *Screen, base: u8, col: Col) !void {
         if (col == DEF) return;
+        if (col & 0xFF000000 == PAL) return s.out.print(s.gpa, ";{d};5;{d}", .{ base, col & 0xff });
         if (s.truecolor) {
             try s.out.print(s.gpa, ";{d};2;{d};{d};{d}", .{ base, (col >> 16) & 0xff, (col >> 8) & 0xff, col & 0xff });
         } else {
@@ -325,16 +332,21 @@ const Screen = struct {
             const prow = s.prev[y * s.w ..][0..s.w];
             if (!s.force and mem.eql(u8, mem.sliceAsBytes(row), mem.sliceAsBytes(prow))) continue;
             s.out.print(g, "\x1b[{d};1H", .{y + 1}) catch return;
-            var cf: Col = 0xFE000000;
-            var cb: Col = 0xFE000000;
+            var cf: Col = 0xFD000000;
+            var cb: Col = 0xFD000000;
             var ca: u8 = 255;
             for (row) |cell| {
+                if (cell.ch == WIDE_CONT) continue;
                 if (cell.fg != cf or cell.bg != cb or cell.at != ca) {
                     s.out.appendSlice(g, "\x1b[0") catch return;
                     s.sgrColor(38, cell.fg) catch return;
                     s.sgrColor(48, cell.bg) catch return;
                     if (cell.at & BOLD != 0) s.out.appendSlice(g, ";1") catch return;
                     if (cell.at & ITAL != 0) s.out.appendSlice(g, ";3") catch return;
+                    if (cell.at & DIM != 0) s.out.appendSlice(g, ";2") catch return;
+                    if (cell.at & UNDER != 0) s.out.appendSlice(g, ";4") catch return;
+                    if (cell.at & REV != 0) s.out.appendSlice(g, ";7") catch return;
+                    if (cell.at & STRIKE != 0) s.out.appendSlice(g, ";9") catch return;
                     s.out.append(g, 'm') catch return;
                     cf = cell.fg;
                     cb = cell.bg;
@@ -371,6 +383,8 @@ const KEY_BTAB: u32 = 0x110009;
 const KEY_DEL: u32 = 0x11000A;
 /// The terminal reports that this pane got focus back (mode 1004).
 const KEY_FOCUS: u32 = 0x11000B;
+/// SGR mouse report; details in Input.mouse.
+const KEY_MOUSE: u32 = 0x11000C;
 const KEY_ESC: u32 = 27;
 const KEY_ENTER: u32 = 13;
 const KEY_TAB: u32 = 9;
@@ -379,9 +393,12 @@ fn ctrl(ch: u8) u32 {
     return ch & 0x1f;
 }
 
+const Mouse = struct { b: u32 = 0, x: usize = 0, y: usize = 0, press: bool = false };
+
 const Input = struct {
     buf: [1024]u8 = undefined,
     len: usize = 0,
+    mouse: Mouse = .{},
 
     fn waitData(timeout_ms: i32) bool {
         var fds = [_]posix.pollfd{.{ .fd = 0, .events = posix.POLL.IN, .revents = 0 }};
@@ -427,6 +444,11 @@ const Input = struct {
                 @memcpy(pbuf[0..plen], self.buf[2..][0..plen]);
                 const params = pbuf[0..plen];
                 self.consume(i + 1);
+                if (params.len > 0 and params[0] == '<' and (final == 'M' or final == 'm')) {
+                    const ps = params[1..];
+                    self.mouse = .{ .b = csiNum(ps, 0, 0), .x = csiNum(ps, 1, 1) -| 1, .y = csiNum(ps, 2, 1) -| 1, .press = final == 'M' };
+                    return KEY_MOUSE;
+                }
                 return switch (final) {
                     'A' => KEY_UP,
                     'B' => KEY_DOWN,
@@ -458,6 +480,233 @@ const Input = struct {
         return b;
     }
 };
+
+// ───────────────────────────────────────────── agent mirror
+//
+// The agent keeps running in its own Rex pane. kibitz reads that pane's screen
+// (`format` in vt form), draws it in a panel, and writes your keystrokes back
+// to it, so the agent looks and behaves exactly as it does on its own.
+
+/// Placeholder for the right half of a double-width character.
+const WIDE_CONT: u32 = 0;
+
+/// Display width of a codepoint: 0 for combining marks, 2 for wide CJK/emoji.
+fn cpWidth(cp: u21) u2 {
+    if ((cp >= 0x300 and cp <= 0x36F) or (cp >= 0x200B and cp <= 0x200F) or (cp >= 0xFE00 and cp <= 0xFE0F) or cp == 0x20E3) return 0;
+    if ((cp >= 0x1100 and cp <= 0x115F) or (cp >= 0x2E80 and cp <= 0xA4CF and cp != 0x303F) or
+        (cp >= 0xAC00 and cp <= 0xD7A3) or (cp >= 0xF900 and cp <= 0xFAFF) or (cp >= 0xFE30 and cp <= 0xFE4F) or
+        (cp >= 0xFF00 and cp <= 0xFF60) or (cp >= 0xFFE0 and cp <= 0xFFE6) or (cp >= 0x1F300 and cp <= 0x1F64F) or
+        (cp >= 0x1F680 and cp <= 0x1F6FF) or (cp >= 0x1F900 and cp <= 0x1F9FF) or (cp >= 0x20000 and cp <= 0x3FFFD)) return 2;
+    return 1;
+}
+
+/// Input modes the agent asked its terminal for; kibitz turns the same ones on
+/// while you type into the panel so keys arrive exactly as the agent expects.
+const Modes = struct {
+    kitty: u8 = 0,
+    other_keys: u8 = 0,
+    paste: bool = false,
+    app_cursor: bool = false,
+    /// 0 off, 1 clicks (1000), 2 drags (1002), 3 all motion (1003)
+    mouse: u2 = 0,
+    focus: bool = false,
+    cursor: bool = true,
+};
+
+const Mirror = struct {
+    cols: usize = 0,
+    rows: usize = 0,
+    cells: []Cell = &.{},
+    cursor: ?[2]usize = null,
+    modes: Modes = .{},
+};
+
+fn csiNum(params: []const u8, idx: usize, default: u32) u32 {
+    var it = mem.splitAny(u8, params, ";");
+    var i: usize = 0;
+    while (it.next()) |p| : (i += 1) {
+        if (i != idx) continue;
+        const main_part = p[0 .. mem.indexOfScalar(u8, p, ':') orelse p.len];
+        return std.fmt.parseInt(u32, main_part, 10) catch default;
+    }
+    return default;
+}
+
+fn applyPrivateMode(m: *Modes, params: []const u8, on: bool) void {
+    var it = mem.splitScalar(u8, params, ';');
+    while (it.next()) |p| {
+        const n = std.fmt.parseInt(u32, p, 10) catch continue;
+        switch (n) {
+            1 => m.app_cursor = on,
+            25 => m.cursor = on,
+            1000 => m.mouse = if (on) @max(m.mouse, 1) else 0,
+            1002 => m.mouse = if (on) @max(m.mouse, 2) else @min(m.mouse, 1),
+            1003 => m.mouse = if (on) 3 else @min(m.mouse, 2),
+            1004 => m.focus = on,
+            2004 => m.paste = on,
+            else => {},
+        }
+    }
+}
+
+const Pen = struct { fg: Col = DEF, bg: Col = DEF, at: u8 = 0 };
+
+fn sgrApply(pen: *Pen, params: []const u8) void {
+    if (params.len == 0) {
+        pen.* = .{};
+        return;
+    }
+    var vals: [32]u32 = undefined;
+    var n: usize = 0;
+    var it = mem.splitScalar(u8, params, ';');
+    while (it.next()) |p| {
+        if (n == vals.len) break;
+        // colon sub-parameters (4:3, 38:2::r:g:b) — keep the leading number only
+        const head = p[0 .. mem.indexOfScalar(u8, p, ':') orelse p.len];
+        vals[n] = std.fmt.parseInt(u32, head, 10) catch 0;
+        n += 1;
+    }
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const v = vals[i];
+        switch (v) {
+            0 => pen.* = .{},
+            1 => pen.at |= BOLD,
+            2 => pen.at |= DIM,
+            3 => pen.at |= ITAL,
+            4 => pen.at |= UNDER,
+            7 => pen.at |= REV,
+            9 => pen.at |= STRIKE,
+            21, 22 => pen.at &= ~(BOLD | DIM),
+            23 => pen.at &= ~ITAL,
+            24 => pen.at &= ~UNDER,
+            27 => pen.at &= ~REV,
+            29 => pen.at &= ~STRIKE,
+            30...37 => pen.fg = PAL | (v - 30),
+            90...97 => pen.fg = PAL | (v - 90 + 8),
+            40...47 => pen.bg = PAL | (v - 40),
+            100...107 => pen.bg = PAL | (v - 100 + 8),
+            39 => pen.fg = DEF,
+            49 => pen.bg = DEF,
+            38, 48, 58 => {
+                var col: ?Col = null;
+                if (i + 1 < n and vals[i + 1] == 5 and i + 2 < n) {
+                    col = PAL | (vals[i + 2] & 0xff);
+                    i += 2;
+                } else if (i + 1 < n and vals[i + 1] == 2 and i + 4 < n) {
+                    col = ((vals[i + 2] & 0xff) << 16) | ((vals[i + 3] & 0xff) << 8) | (vals[i + 4] & 0xff);
+                    i += 4;
+                }
+                if (col) |c2| {
+                    if (v == 38) pen.fg = c2 else if (v == 48) pen.bg = c2;
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+/// Mode switches at the very start of a capture (before the first line).
+fn parseLeadModes(head: []const u8, m: *Modes) void {
+    var i: usize = 0;
+    while (i + 2 < head.len and head[i] == 0x1b and head[i + 1] == '[') {
+        var j = i + 2;
+        while (j < head.len and !(head[j] >= 0x40 and head[j] <= 0x7e)) j += 1;
+        if (j >= head.len) return;
+        const params = head[i + 2 .. j];
+        if (params.len > 0 and params[0] == '?' and (head[j] == 'h' or head[j] == 'l')) applyPrivateMode(m, params[1..], head[j] == 'h');
+        i = j + 1;
+    }
+}
+
+/// Build the agent's screen from a vt capture. `body` is the whole capture or
+/// its tail (`cut` = the first line may be partial). The screen is the last
+/// `rows` lines; the trailing escapes carry the cursor and keyboard modes.
+fn parseScreen(gpa: Allocator, body: []const u8, cut: bool, cols: usize, rows: usize, m: *Mirror) !void {
+    m.cols = cols;
+    m.rows = rows;
+    m.cells = try gpa.alloc(Cell, cols * rows);
+    @memset(m.cells, .{});
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(gpa);
+    var it = mem.splitSequence(u8, body, "\r\n");
+    if (cut) _ = it.next();
+    while (it.next()) |l| try lines.append(gpa, l);
+    const first = lines.items.len -| rows;
+    for (lines.items[first..], 0..) |line, r| {
+        var pen: Pen = .{};
+        var x: usize = 0;
+        var i: usize = 0;
+        while (i < line.len) {
+            const b = line[i];
+            if (b == 0x1b and i + 1 < line.len) {
+                if (line[i + 1] == '[') {
+                    var j = i + 2;
+                    while (j < line.len and !(line[j] >= 0x40 and line[j] <= 0x7e)) j += 1;
+                    if (j >= line.len) break;
+                    const raw = line[i + 2 .. j];
+                    const lead: u8 = if (raw.len > 0 and (raw[0] == '?' or raw[0] == '>' or raw[0] == '=' or raw[0] == '<')) raw[0] else 0;
+                    const params = if (lead != 0) raw[1..] else raw;
+                    switch (line[j]) {
+                        'm' => if (lead == 0) sgrApply(&pen, params) else if (lead == '>' and csiNum(params, 0, 0) == 4) {
+                            m.modes.other_keys = @intCast(@min(csiNum(params, 1, 0), 3));
+                        },
+                        'C' => if (lead == 0) {
+                            x += @max(1, csiNum(params, 0, 1));
+                        },
+                        'H' => if (lead == 0) {
+                            m.cursor = .{ csiNum(params, 0, 1) -| 1, csiNum(params, 1, 1) -| 1 };
+                        },
+                        'h', 'l' => if (lead == '?') applyPrivateMode(&m.modes, params, line[j] == 'h'),
+                        'u' => if (lead == '=') {
+                            m.modes.kitty = @intCast(csiNum(params, 0, 0) & 0x1f);
+                        },
+                        else => {},
+                    }
+                    i = j + 1;
+                } else if (line[i + 1] == ']') {
+                    // OSC (hyperlinks, titles): skip to BEL or ST
+                    var j = i + 2;
+                    while (j < line.len and line[j] != 7 and !(line[j] == 0x1b and j + 1 < line.len and line[j + 1] == '\\')) j += 1;
+                    i = if (j < line.len and line[j] == 7) j + 1 else j + 2;
+                } else i += 2;
+                continue;
+            }
+            if (b < 0x20 or b == 0x7f) {
+                if (b == '\r') x = 0;
+                i += 1;
+                continue;
+            }
+            const d = decode(line[i..]);
+            i += d.len;
+            const cw = cpWidth(d.cp);
+            if (cw == 0) continue;
+            if (x + cw <= cols) {
+                m.cells[r * cols + x] = .{ .ch = d.cp, .fg = pen.fg, .bg = pen.bg, .at = pen.at };
+                if (cw == 2) m.cells[r * cols + x + 1] = .{ .ch = WIDE_CONT, .fg = pen.fg, .bg = pen.bg, .at = pen.at };
+            }
+            x += cw;
+        }
+    }
+    if (!m.modes.cursor) m.cursor = null;
+}
+
+/// JSON string body for `write`, escaping what JSON needs. Input must be UTF-8.
+fn jsonEscape(gpa: Allocator, out: *std.ArrayList(u8), bytes: []const u8) !void {
+    for (bytes) |b| switch (b) {
+        '"' => try out.appendSlice(gpa, "\\\""),
+        '\\' => try out.appendSlice(gpa, "\\\\"),
+        0...0x1f, 0x7f => try out.print(gpa, "\\u{x:0>4}", .{b}),
+        else => try out.append(gpa, b),
+    };
+}
+
+/// Is this CSI sequence ctrl+] in kitty or modifyOtherKeys encoding?
+fn isCtrlBracket(params: []const u8, final: u8) bool {
+    if (final == 'u') return csiNum(params, 0, 0) == 93 and (csiNum(params, 1, 1) -| 1) & 0b100 != 0;
+    if (final == '~') return csiNum(params, 0, 0) == 27 and csiNum(params, 2, 0) == 93 and (csiNum(params, 1, 1) -| 1) & 0b100 != 0;
+    return false;
+}
 
 // ───────────────────────────────────────────── diff model
 
@@ -955,8 +1204,18 @@ const App = struct {
     focus: Focus = .tree,
     sidebar: bool = true,
     agent: *const Agent = &generic_agent,
-    /// Zoom was turned off to show the agent; turn it back on when focus returns.
-    rezoom: bool = false,
+    // agent panel: a live copy of the agent's pane, filled by mirrorLoop
+    panel_open: std.atomic.Value(bool) = .init(false),
+    agent_focus: std.atomic.Value(bool) = .init(false),
+    quit: std.atomic.Value(bool) = .init(false),
+    mirror_mu: Io.Mutex = .init,
+    mirror: Mirror = .{},
+    applied: Modes = .{},
+    /// Where the panel was last drawn: screen x/y, size, and first agent row shown.
+    pan: struct { x: usize = 0, y: usize = 0, w: usize = 0, h: usize = 0, row0: usize = 0 } = .{},
+    agent_cursor: ?[2]usize = null,
+    /// Set after typing so the mirror refreshes right away.
+    mirror_due: std.atomic.Value(bool) = .init(false),
     search: std.ArrayList(u8) = .empty,
     msg_buf: [512]u8 = undefined,
     msg_len: usize = 0,
@@ -1530,7 +1789,7 @@ const App = struct {
 
     fn draw(self: *App) void {
         self.drawFrame();
-        self.scr.flush(null);
+        self.scr.flush(if (self.agent_focus.load(.acquire)) self.agent_cursor else null);
     }
 
     fn drawFrame(self: *App) void {
@@ -1543,10 +1802,53 @@ const App = struct {
         const top: usize = 2;
         const bh: usize = @max(1, h -| 3);
         self.page = bh;
-        self.drawHeader(w);
-        self.hrule(1, 0, w, P.rule);
-        if (self.mode == .diff) self.drawDiff(top, bh, w) else self.drawFiles(top, bh, w);
+        // the agent panel sits on the right at the agent's own width, like its pane would
+        var dw = w;
+        self.pan.w = 0;
+        if (self.panel_open.load(.acquire)) {
+            self.mirror_mu.lockUncancelable(self.io);
+            const mc = self.mirror.cols;
+            self.mirror_mu.unlock(self.io);
+            const pw = @min(if (mc > 0) mc else w * 45 / 100, w -| 41);
+            if (pw >= 20) dw = w - pw - 1;
+        }
+        self.drawHeader(dw);
+        self.hrule(1, 0, dw, P.rule);
+        if (self.mode == .diff) self.drawDiff(top, bh, dw) else self.drawFiles(top, bh, dw);
+        if (dw < w) self.drawPanel(dw + 1, w - dw - 1, h - 1);
         self.drawStatus(h - 1, w);
+    }
+
+    fn drawPanel(self: *App, x0: usize, pw: usize, ph: usize) void {
+        const s = &self.scr;
+        const focused = self.agent_focus.load(.acquire);
+        for (0..ph) |y| s.set(y, x0 - 1, '│', if (focused) self.agent.color else P.rule, P.def, 0);
+        self.agent_cursor = null;
+        self.mirror_mu.lockUncancelable(self.io);
+        defer self.mirror_mu.unlock(self.io);
+        const m = &self.mirror;
+        if (m.rows == 0) {
+            var tb: [64]u8 = undefined;
+            _ = s.put(1, x0 + 2, std.fmt.bufPrint(&tb, "connecting to {s}…", .{self.agent.name}) catch "", P.faint, P.def, ITAL);
+            self.pan = .{ .x = x0, .w = pw, .h = ph };
+            return;
+        }
+        // show the bottom of the agent's screen, keeping its cursor in view
+        var row0 = m.rows -| ph;
+        if (m.cursor) |cu| row0 = @min(row0, cu[0]);
+        self.pan = .{ .x = x0, .y = 0, .w = pw, .h = ph, .row0 = row0 };
+        for (0..@min(ph, m.rows - row0)) |r| {
+            const src = m.cells[(row0 + r) * m.cols ..][0..m.cols];
+            for (0..@min(pw, m.cols)) |cx| {
+                var cell = src[cx];
+                // a wide char cut off at the edge
+                if (cx + 1 == pw and cx + 1 < m.cols and src[cx + 1].ch == WIDE_CONT) cell.ch = ' ';
+                s.cells[r * s.w + x0 + cx] = cell;
+            }
+        }
+        if (m.cursor) |cu| if (cu[0] >= row0 and cu[0] - row0 < ph and cu[1] < pw) {
+            self.agent_cursor = .{ cu[0] - row0, x0 + cu[1] };
+        };
     }
 
     fn hrule(self: *App, y: usize, x: usize, n: usize, col: Col) void {
@@ -1959,8 +2261,10 @@ const App = struct {
     fn drawStatus(self: *App, y: usize, w: usize) void {
         const s = &self.scr;
         const visual = if (self.activeView()) |v| v.sel != null else false;
-        const mode_col = if (visual) P.visual else if (self.mode == .diff) P.accent else P.func;
-        const mode_name: []const u8 = if (visual) "VISUAL" else if (self.mode == .diff) "DIFF" else if (self.focus == .tree) "TREE" else "VIEW";
+        const typing = self.agent_focus.load(.acquire);
+        var nb: [16]u8 = undefined;
+        const mode_col = if (typing) self.agent.color else if (visual) P.visual else if (self.mode == .diff) P.accent else P.func;
+        const mode_name: []const u8 = if (typing) std.ascii.upperString(&nb, self.agent.key[0..@min(self.agent.key.len, nb.len)]) else if (visual) "VISUAL" else if (self.mode == .diff) "DIFF" else if (self.focus == .tree) "TREE" else "VIEW";
         _ = s.put(y, 0, "▌", mode_col, P.def, 0);
         var x = s.put(y, 1, mode_name, mode_col, P.def, BOLD) + 2;
 
@@ -1970,7 +2274,8 @@ const App = struct {
         }
         const diff_hints = [_][2][]const u8{ .{ "c", "comment" }, .{ "S", "send" }, .{ "t", self.agent.key }, .{ "f", "files" }, .{ "?", "help" } };
         const file_hints = [_][2][]const u8{ .{ "⏎", "open" }, .{ "h/l", "pane" }, .{ "c", "comment" }, .{ "t", self.agent.key }, .{ "f", "diff" }, .{ "?", "help" } };
-        const hints: []const [2][]const u8 = if (self.mode == .diff) &diff_hints else &file_hints;
+        const agent_hints = [_][2][]const u8{ .{ "^]", "back to diff" }, .{ "click", "diff to return" } };
+        const hints: []const [2][]const u8 = if (typing) &agent_hints else if (self.mode == .diff) &diff_hints else &file_hints;
         var ub: [32]u8 = undefined;
         const ustr = if (unsent > 0) std.fmt.bufPrint(&ub, "● {d} unsent", .{unsent}) catch "" else "";
         var pb: [16]u8 = undefined;
@@ -2241,7 +2546,7 @@ const App = struct {
         if (self.sendToAgent(m)) {
             self.markSent();
             self.setMsg("sent {d} comment(s) to {s}", .{ pending, self.agent.name });
-            self.toAgent(null);
+            self.openPanel(true);
         } else {
             self.setMsg("send failed — comments saved to {s}", .{path});
         }
@@ -2252,41 +2557,238 @@ const App = struct {
         for (self.comments.items) |*cm| cm.sent = true;
     }
 
-    /// Show the agent's own pane next to kibitz and move focus there.
-    /// `prefill` is typed into the agent's input without submitting it.
-    fn toAgent(self: *App, prefill: ?[]const u8) void {
-        const target = self.target orelse {
+    fn openPanel(self: *App, on: bool) void {
+        if (on == self.panel_open.load(.acquire)) return;
+        if (!on) self.leaveAgent();
+        self.panel_open.store(on, .release);
+        // clicks select the panel or the diff while it's open
+        writeAll(1, if (on) "\x1b[?1000h\x1b[?1006h" else "\x1b[?1000l\x1b[?1006l");
+    }
+
+    /// Start typing into the agent. `prefill` goes into its input unsent.
+    fn enterAgent(self: *App, prefill: ?[]const u8) void {
+        if (self.target == null) {
             self.setMsg("no agent pane linked (launch with `! kibitz` from your agent)", .{});
             return;
-        };
-        if (self.zoomed) {
-            self.setZoom(false);
-            self.rezoom = true;
         }
-        const r = self.rexRun("focus", &.{target}) orelse {
-            self.setMsg("could not switch to {s}", .{self.agent.name});
+        self.openPanel(true);
+        self.agent_focus.store(true, .release);
+        self.msg_len = 0;
+        const modes = self.agentModes();
+        self.applyModes(modes);
+        if (modes.focus) self.agentWrite("\x1b[I");
+        if (prefill) |text| self.agentWrite(text);
+    }
+
+    fn agentModes(self: *App) Modes {
+        self.mirror_mu.lockUncancelable(self.io);
+        defer self.mirror_mu.unlock(self.io);
+        return self.mirror.modes;
+    }
+
+    fn leaveAgent(self: *App) void {
+        if (!self.agent_focus.load(.acquire)) return;
+        self.agent_focus.store(false, .release);
+        self.applyModes(.{});
+        if (self.agentModes().focus) self.agentWrite("\x1b[O");
+        self.scr.force = true;
+    }
+
+    /// Mirror the agent's keyboard/paste/mouse modes onto our own terminal.
+    fn applyModes(self: *App, want: Modes) void {
+        if (std.meta.eql(want, self.applied)) return;
+        var buf: [160]u8 = undefined;
+        const seq = std.fmt.bufPrint(&buf, "\x1b[=0;1u\x1b[>4;0m\x1b[?2004l\x1b[?1l\x1b[?1002l\x1b[?1003l{s}{s}{s}{s}{s}", .{
+            if (want.paste) "\x1b[?2004h" else "",
+            if (want.app_cursor) "\x1b[?1h" else "",
+            if (want.mouse >= 2) "\x1b[?1002h" else "",
+            if (want.mouse == 3) "\x1b[?1003h" else "",
+            "",
+        }) catch return;
+        writeAll(1, seq);
+        if (want.kitty > 0) {
+            var kb: [16]u8 = undefined;
+            writeAll(1, std.fmt.bufPrint(&kb, "\x1b[={d};1u", .{want.kitty}) catch "");
+        }
+        if (want.other_keys > 0) {
+            var kb: [16]u8 = undefined;
+            writeAll(1, std.fmt.bufPrint(&kb, "\x1b[>4;{d}m", .{want.other_keys}) catch "");
+        }
+        self.applied = want;
+    }
+
+    /// Type raw bytes into the agent's terminal.
+    fn agentWrite(self: *App, bytes: []const u8) void {
+        if (bytes.len == 0) return;
+        const t = self.target orelse return;
+        const rex = self.rex orelse return;
+        var js: std.ArrayList(u8) = .empty;
+        defer js.deinit(self.gpa);
+        js.appendSlice(self.gpa, "{\"data\":\"") catch return;
+        jsonEscape(self.gpa, &js, bytes) catch return;
+        js.appendSlice(self.gpa, "\"}") catch return;
+        if (rexJson(self.gpa, self.io, rex, self.session, &.{ "block", "call", "-b", t, "write", js.items })) |out| self.gpa.free(out);
+        self.mirror_due.store(true, .release);
+    }
+
+    /// While typing into the agent, stdin goes to it untouched, except ctrl+]
+    /// and clicks outside the panel (back to kibitz) and our own focus reports.
+    fn agentInput(self: *App) void {
+        const in = &self.input;
+        if (in.len == 0) {
+            if (!Input.waitData(30)) return;
+            in.readMore();
+        }
+        var fwd: std.ArrayList(u8) = .empty;
+        defer fwd.deinit(self.gpa);
+        const b = in.buf[0..in.len];
+        var i: usize = 0;
+        var leave = false;
+        while (i < b.len and !leave) {
+            const ch = b[i];
+            if (ch == 0x1d) {
+                i += 1;
+                leave = true;
+            } else if (ch == 0x1b and i + 1 < b.len and b[i + 1] == '[') {
+                var j = i + 2;
+                while (j < b.len and !(b[j] >= 0x40 and b[j] <= 0x7e)) j += 1;
+                if (j >= b.len) {
+                    fwd.appendSlice(self.gpa, b[i..]) catch {};
+                    i = b.len;
+                    break;
+                }
+                const params = b[i + 2 .. j];
+                const final = b[j];
+                const seq = b[i .. j + 1];
+                i = j + 1;
+                if ((final == 'I' or final == 'O') and params.len == 0) continue;
+                if (isCtrlBracket(params, final)) {
+                    leave = true;
+                } else if (params.len > 0 and params[0] == '<' and (final == 'M' or final == 'm')) {
+                    const ps = params[1..];
+                    const ev: Mouse = .{ .b = csiNum(ps, 0, 0), .x = csiNum(ps, 1, 1) -| 1, .y = csiNum(ps, 2, 1) -| 1, .press = final == 'M' };
+                    if (self.inPanel(ev)) {
+                        self.mouseToAgent(ev, &fwd);
+                    } else if (ev.press and ev.b & 0x63 == 0) leave = true;
+                } else fwd.appendSlice(self.gpa, seq) catch {};
+            } else if (ch >= 0xC0) {
+                const need: usize = if (ch >= 0xF0) 4 else if (ch >= 0xE0) 3 else 2;
+                if (i + need > b.len) break; // rest of the character hasn't arrived yet
+                fwd.appendSlice(self.gpa, b[i .. i + need]) catch {};
+                i += need;
+            } else {
+                fwd.append(self.gpa, ch) catch {};
+                i += 1;
+            }
+        }
+        in.consume(i);
+        self.agentWrite(fwd.items);
+        if (leave) self.leaveAgent();
+    }
+
+    fn inPanel(self: *App, ev: Mouse) bool {
+        const p = self.pan;
+        return p.w > 0 and ev.x >= p.x and ev.x < p.x + p.w and ev.y >= p.y and ev.y < p.y + p.h;
+    }
+
+    /// Re-aim a mouse report at the agent's own screen coordinates.
+    fn mouseToAgent(self: *App, ev: Mouse, out: *std.ArrayList(u8)) void {
+        if (self.agentModes().mouse == 0) return;
+        const p = self.pan;
+        out.print(self.gpa, "\x1b[<{d};{d};{d}{c}", .{ ev.b, ev.x - p.x + 1, ev.y - p.y + p.row0 + 1, @as(u8, if (ev.press) 'M' else 'm') }) catch {};
+    }
+
+    /// Mouse while kibitz has the keys: click the panel to type into the agent,
+    /// scroll the diff or the agent under the pointer.
+    fn onMouse(self: *App) !void {
+        const ev = self.input.mouse;
+        const wheel = ev.b & 64 != 0;
+        if (self.inPanel(ev)) {
+            if (wheel) {
+                var fwd: std.ArrayList(u8) = .empty;
+                defer fwd.deinit(self.gpa);
+                self.mouseToAgent(ev, &fwd);
+                self.agentWrite(fwd.items);
+            } else if (ev.press and ev.b & 3 == 0) self.enterAgent(null);
             return;
-        };
-        self.gpa.free(r.out);
-        if (prefill) |text| if (self.rexRun("send", &.{ "-b", target, text })) |r2| self.gpa.free(r2.out);
-        self.setMsg("in {s} — click here or run `! kibitz` to come back", .{self.agent.name});
+        }
+        if (!wheel) return;
+        const k: u32 = if (ev.b & 1 == 0) KEY_UP else KEY_DOWN;
+        if (self.mode == .files and self.focus == .tree) try self.handleTree(k, 3) else if (self.activeView()) |v| try self.handleList(v, k, 3);
     }
 
     fn talk(self: *App) void {
         var lb: [600]u8 = undefined;
         const loc = self.location(&lb);
-        if (loc.len == 0) return self.toAgent(null);
+        if (loc.len == 0) return self.enterAgent(null);
         var pb: [700]u8 = undefined;
-        const pre = std.fmt.bufPrint(&pb, "[looking at {s}] ", .{loc}) catch return self.toAgent(null);
-        self.toAgent(pre);
+        const pre = std.fmt.bufPrint(&pb, "[looking at {s}] ", .{loc}) catch return self.enterAgent(null);
+        self.enterAgent(pre);
     }
 
-    fn focusBack(self: *App) void {
-        self.scr.force = true;
-        if (self.rezoom) {
-            self.rezoom = false;
-            self.setZoom(true);
+    /// Keep `mirror` in step with the agent's pane: fast while you're typing
+    /// into it, slower while you're only watching.
+    fn mirrorLoop(self: *App) void {
+        var frame: usize = 0;
+        var cols: usize = 0;
+        var rows: usize = 0;
+        while (!self.quit.load(.acquire)) {
+            if (self.panel_open.load(.acquire)) {
+                var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+                defer arena.deinit();
+                if (frame % 8 == 0 or cols == 0) if (self.agentSize(arena.allocator())) |sz| {
+                    cols = sz[0];
+                    rows = sz[1];
+                };
+                frame += 1;
+                if (cols > 0) self.refreshMirror(arena.allocator(), cols, rows);
+            }
+            var waited: u64 = 0;
+            const period: u64 = if (self.agent_focus.load(.acquire)) 25 else if (self.panel_open.load(.acquire)) 200 else 300;
+            while (waited < period and !self.mirror_due.swap(false, .acq_rel)) : (waited += 5) {
+                self.io.sleep(Io.Duration.fromMilliseconds(5), .awake) catch {};
+            }
         }
+    }
+
+    fn agentSize(self: *App, arena: Allocator) ?[2]usize {
+        const out = rexJson(arena, self.io, self.rex.?, self.session, &.{ "block", "call", "-b", self.target.?, "size" }) orelse return null;
+        const v = std.json.parseFromSliceLeaky(std.json.Value, arena, out, .{}) catch return null;
+        const c2 = jsonGet(v, "columns") orelse return null;
+        const r2 = jsonGet(v, "rows") orelse return null;
+        if (c2 != .integer or r2 != .integer or c2.integer <= 0 or r2.integer <= 0) return null;
+        return .{ @intCast(@min(c2.integer, 1000)), @intCast(@min(r2.integer, 500)) };
+    }
+
+    fn refreshMirror(self: *App, arena: Allocator, cols: usize, rows: usize) void {
+        const rex = self.rex.?;
+        const t = self.target.?;
+        const chunk = 98304;
+        const head_out = rexJson(arena, self.io, rex, self.session, &.{ "block", "call", "-b", t, "format", "{\"format\":\"vt\",\"extra_cursor\":true,\"extra_modes\":true,\"extra_kitty_keyboard\":true,\"extra_keyboard\":true,\"max_bytes\":98304}" }) orelse return;
+        const hv = std.json.parseFromSliceLeaky(std.json.Value, arena, head_out, .{}) catch return;
+        const head = jsonStr(hv, "content") orelse return;
+        const total: usize = if (jsonGet(hv, "total")) |x| (if (x == .integer and x.integer > 0) @intCast(x.integer) else head.len) else head.len;
+        var body = head;
+        var cut = false;
+        if (total > head.len) {
+            // long scrollback: read just the end, where the screen is
+            const id = jsonGet(hv, "id") orelse return;
+            if (id != .integer) return;
+            const off = total -| chunk;
+            const args = std.fmt.allocPrint(arena, "{{\"id\":{d},\"offset\":{d},\"max_bytes\":{d}}}", .{ id.integer, off, chunk }) catch return;
+            const tail_out = rexJson(arena, self.io, rex, self.session, &.{ "block", "call", "-b", t, "blob_read", args }) orelse return;
+            const tv = std.json.parseFromSliceLeaky(std.json.Value, arena, tail_out, .{}) catch return;
+            body = jsonStr(tv, "data") orelse return;
+            cut = true;
+        }
+        var m: Mirror = .{};
+        parseLeadModes(head, &m.modes);
+        parseScreen(self.gpa, body, cut, cols, rows, &m) catch return;
+        self.mirror_mu.lockUncancelable(self.io);
+        const old = self.mirror.cells;
+        self.mirror = m;
+        self.mirror_mu.unlock(self.io);
+        self.gpa.free(old);
     }
 
     fn setZoom(self: *App, on: bool) void {
@@ -2472,12 +2974,15 @@ const App = struct {
     fn run(self: *App) !void {
         while (true) {
             self.draw();
-            const k = self.input.next(250) orelse {
-                const t = self.now();
-                if (t - self.last_check > 2000) {
-                    self.last_check = t;
-                    if (self.reload(false) catch false) self.setMsg("diff changed — reloaded", .{});
-                }
+            if (self.agent_focus.load(.acquire)) {
+                self.agentInput();
+                // the agent may change keyboard modes mid-session (e.g. a prompt)
+                if (self.agent_focus.load(.acquire)) self.applyModes(self.agentModes());
+                self.maybeReload();
+                continue;
+            }
+            const k = self.input.next(if (self.panel_open.load(.acquire)) 40 else 250) orelse {
+                self.maybeReload();
                 continue;
             };
             if (k == 0) continue;
@@ -2501,6 +3006,14 @@ const App = struct {
         }
     }
 
+    fn maybeReload(self: *App) void {
+        const t = self.now();
+        if (t - self.last_check > 2000) {
+            self.last_check = t;
+            if (self.reload(false) catch false) self.setMsg("diff changed — reloaded", .{});
+        }
+    }
+
     fn handle(self: *App, k: u32, count: usize) !bool {
         const files = self.mode == .files;
         const diffm = self.mode == .diff;
@@ -2509,10 +3022,12 @@ const App = struct {
             '?' => self.showHelp(),
             'f' => try self.toggleMode(),
             't' => self.talk(),
+            'i' => self.enterAgent(null),
             'S' => self.sendAll(),
             'e' => self.openEditor(),
-            'C' => self.toAgent(null),
-            KEY_FOCUS => self.focusBack(),
+            'C' => if (self.target != null) self.openPanel(!self.panel_open.load(.acquire)) else self.setMsg("no agent pane linked (launch with `! kibitz` from your agent)", .{}),
+            KEY_FOCUS => self.scr.force = true,
+            KEY_MOUSE => try self.onMouse(),
             'z' => self.setZoom(!self.zoomed),
             'r' => if (try self.reload(true)) self.setMsg("reloaded", .{}) else self.setMsg("no changes", .{}),
             'g' => self.pending_g = true,
@@ -2921,6 +3436,11 @@ pub fn main(init: std.process.Init) !u8 {
 
     enterRaw();
     defer leaveRaw();
+    const th = if (app.target != null and app.rex != null) std.Thread.spawn(.{}, App.mirrorLoop, .{&app}) catch null else null;
+    defer if (th) |t| {
+        app.quit.store(true, .release);
+        t.join();
+    };
     try app.run();
     return 0;
 }
@@ -3088,4 +3608,32 @@ test "agents are recognised from ps command lines" {
     try testing.expect(agentOfCommand("node server.js") == null);
     try testing.expectEqualStrings("agy", agentByKey("antigravity").?.key);
     try testing.expectEqualStrings("agy", agentByKey("Antigravity").?.key);
+}
+
+test "agent screen is rebuilt from a vt capture" {
+    const cap = "\x1b[?25l\x1b[?2004h\r\nold scrollback\r\n\x1b[0m\x1b[1m\x1b[38;2;1;2;3mhi\x1b[0m\x1b[2Cx\r\n\x1b[31m你\x1b[0mz\r\n> \x1b[>4;2m\x1b[3;3H\x1b[=5;1u";
+    var m: Mirror = .{};
+    parseLeadModes(cap, &m.modes);
+    try parseScreen(testing.allocator, cap, false, 8, 3, &m);
+    defer testing.allocator.free(m.cells);
+    try testing.expect(m.modes.paste and !m.modes.cursor);
+    try testing.expectEqual(@as(u8, 5), m.modes.kitty);
+    try testing.expectEqual(@as(u8, 2), m.modes.other_keys);
+    try testing.expectEqual(@as(u32, 'h'), m.cells[0].ch);
+    try testing.expectEqual(@as(Col, 0x010203), m.cells[0].fg);
+    try testing.expect(m.cells[0].at & BOLD != 0);
+    try testing.expectEqual(@as(u32, 'x'), m.cells[4].ch);
+    try testing.expectEqual(@as(u32, 0x4F60), m.cells[8].ch);
+    try testing.expectEqual(PAL | 1, m.cells[8].fg);
+    try testing.expectEqual(WIDE_CONT, m.cells[9].ch);
+    try testing.expectEqual(@as(u32, 'z'), m.cells[10].ch);
+    try testing.expectEqual(@as(u32, '>'), m.cells[16].ch);
+    try testing.expect(m.cursor == null); // hidden by ?25l
+}
+
+test "ctrl+] is recognised in every keyboard encoding" {
+    try testing.expect(isCtrlBracket("93;5", 'u'));
+    try testing.expect(isCtrlBracket("27;5;93", '~'));
+    try testing.expect(!isCtrlBracket("93;1", 'u'));
+    try testing.expect(!isCtrlBracket("97;5", 'u'));
 }
