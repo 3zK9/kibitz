@@ -151,7 +151,7 @@ const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8
     } },
     .{ .title = "Agent", .keys = &.{
         .{ "t", "talk to the agent about this line" }, .{ "i", "type to the agent" },
-        .{ "C", "show / hide the agent panel" },       .{ "^]", "back to the diff (or click it)" },
+        .{ "C  esc", "show / hide the agent panel" },  .{ "^]", "back to the diff (or click it)" },
     } },
     .{ .title = "Other", .keys = &.{
         .{ "f", "switch diff ⇄ files" },
@@ -2274,8 +2274,9 @@ const App = struct {
         }
         const diff_hints = [_][2][]const u8{ .{ "c", "comment" }, .{ "S", "send" }, .{ "t", self.agent.key }, .{ "f", "files" }, .{ "?", "help" } };
         const file_hints = [_][2][]const u8{ .{ "⏎", "open" }, .{ "h/l", "pane" }, .{ "c", "comment" }, .{ "t", self.agent.key }, .{ "f", "diff" }, .{ "?", "help" } };
-        const agent_hints = [_][2][]const u8{ .{ "^]", "back to diff" }, .{ "click", "diff to return" } };
-        const hints: []const [2][]const u8 = if (typing) &agent_hints else if (self.mode == .diff) &diff_hints else &file_hints;
+        const agent_hints = [_][2][]const u8{ .{ "^]", "back to diff" }, .{ "^] esc", "close panel" } };
+        const panel_hints = [_][2][]const u8{ .{ "esc", "close panel" }, .{ "i", "type to agent" }, .{ "c", "comment" }, .{ "S", "send" }, .{ "?", "help" } };
+        const hints: []const [2][]const u8 = if (typing) &agent_hints else if (self.panel_open.load(.acquire)) &panel_hints else if (self.mode == .diff) &diff_hints else &file_hints;
         var ub: [32]u8 = undefined;
         const ustr = if (unsent > 0) std.fmt.bufPrint(&ub, "● {d} unsent", .{unsent}) catch "" else "";
         var pb: [16]u8 = undefined;
@@ -3100,7 +3101,9 @@ const App = struct {
             'L', KEY_RIGHT => v.hscroll += 8 * count,
             'H', KEY_LEFT => v.hscroll -|= 8 * count,
             'v' => v.sel = if (v.sel != null) null else v.cursor,
-            KEY_ESC => v.sel = null,
+            KEY_ESC => if (v.sel != null) {
+                v.sel = null;
+            } else self.openPanel(false),
             'c' => try self.addComment(v),
             'x' => try self.deleteComment(v),
             else => {},
@@ -3124,6 +3127,7 @@ const App = struct {
             KEY_TAB => if (self.fv_open) {
                 self.focus = .viewer;
             },
+            KEY_ESC => self.openPanel(false),
             'l', KEY_ENTER, '\n', KEY_RIGHT, ' ' => {
                 if (n == 0) return;
                 const node = self.nodes.items[rows[self.t_cursor].node];

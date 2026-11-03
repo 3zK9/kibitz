@@ -32,7 +32,7 @@ into the agent session that made the changes — without leaving the terminal.
   review file and tells the agent to address them.
 - **Your agent, inside kibitz** — the agent's real screen runs in a panel on the right.
   `i` (or a click) types straight into it, colors, shortcuts and all; `t` does the same with
-  the line you're on already typed. `Ctrl+]` or a click on the diff takes you back.
+  the line you're on already typed. `Ctrl+]` or a click on the diff takes you back, and `Esc` closes the panel.
 - **Live reload** — the diff refreshes every 2 seconds, so you can watch an agent work.
 - Untracked files are included; any `git diff` arguments work (`kibitz main`, `kibitz --cached`).
 
@@ -81,7 +81,7 @@ the running processes; pass `--agent claude|codex|pi|agy` to pick one yourself. 
 | `c` · `v` · `x` | comment · visual select · delete comment |
 | `S` | send all comments to the agent |
 | `t` · `i` | talk to the agent about this line · type to the agent |
-| `C` · `Ctrl+]` | show / hide the agent panel · back to the diff |
+| `Esc` / `C` · `Ctrl+]` | close / toggle the agent panel · back to the diff |
 | `e` | open in `$EDITOR` at this line |
 | `z` · `r` · `?` · `q` | zoom pane · reload · help · quit |
 
