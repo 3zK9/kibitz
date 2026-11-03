@@ -151,7 +151,7 @@ const help_sections = [_]struct { title: []const u8, keys: []const [2][]const u8
     } },
     .{ .title = "Agent", .keys = &.{
         .{ "t", "talk to the agent about this line" }, .{ "i", "type to the agent" },
-        .{ "C  esc", "show / hide the agent panel" },  .{ "^]", "back to the diff (or click it)" },
+        .{ "^space", "jump between diff and agent" },  .{ "C  esc", "show / hide the agent panel" },
     } },
     .{ .title = "Other", .keys = &.{
         .{ "f", "switch diff ⇄ files" },
@@ -385,6 +385,8 @@ const KEY_DEL: u32 = 0x11000A;
 const KEY_FOCUS: u32 = 0x11000B;
 /// SGR mouse report; details in Input.mouse.
 const KEY_MOUSE: u32 = 0x11000C;
+/// Ctrl+Space, which terminals send as a NUL byte.
+const KEY_CSPACE: u32 = 0x11000D;
 const KEY_ESC: u32 = 27;
 const KEY_ENTER: u32 = 13;
 const KEY_TAB: u32 = 9;
@@ -477,7 +479,7 @@ const Input = struct {
             return d.cp;
         }
         self.consume(1);
-        return b;
+        return if (b == 0) KEY_CSPACE else b;
     }
 };
 
@@ -701,11 +703,15 @@ fn jsonEscape(gpa: Allocator, out: *std.ArrayList(u8), bytes: []const u8) !void 
     };
 }
 
-/// Is this CSI sequence ctrl+] in kitty or modifyOtherKeys encoding?
-fn isCtrlBracket(params: []const u8, final: u8) bool {
-    if (final == 'u') return csiNum(params, 0, 0) == 93 and (csiNum(params, 1, 1) -| 1) & 0b100 != 0;
-    if (final == '~') return csiNum(params, 0, 0) == 27 and csiNum(params, 2, 0) == 93 and (csiNum(params, 1, 1) -| 1) & 0b100 != 0;
-    return false;
+/// Is this CSI sequence the panel switch key (ctrl+space, or ctrl+] as a
+/// fallback) in kitty or modifyOtherKeys encoding?
+fn isSwitchKey(params: []const u8, final: u8) bool {
+    const key, const mods = switch (final) {
+        'u' => .{ csiNum(params, 0, 0), csiNum(params, 1, 1) },
+        '~' => if (csiNum(params, 0, 0) == 27) .{ csiNum(params, 2, 0), csiNum(params, 1, 1) } else return false,
+        else => return false,
+    };
+    return (key == ' ' or key == ']') and (mods -| 1) & 0b100 != 0;
 }
 
 // ───────────────────────────────────────────── diff model
@@ -2274,8 +2280,8 @@ const App = struct {
         }
         const diff_hints = [_][2][]const u8{ .{ "c", "comment" }, .{ "S", "send" }, .{ "t", self.agent.key }, .{ "f", "files" }, .{ "?", "help" } };
         const file_hints = [_][2][]const u8{ .{ "⏎", "open" }, .{ "h/l", "pane" }, .{ "c", "comment" }, .{ "t", self.agent.key }, .{ "f", "diff" }, .{ "?", "help" } };
-        const agent_hints = [_][2][]const u8{ .{ "^]", "back to diff" }, .{ "^] esc", "close panel" } };
-        const panel_hints = [_][2][]const u8{ .{ "esc", "close panel" }, .{ "i", "type to agent" }, .{ "c", "comment" }, .{ "S", "send" }, .{ "?", "help" } };
+        const agent_hints = [_][2][]const u8{ .{ "^space", "back to diff" }, .{ "^space esc", "close panel" } };
+        const panel_hints = [_][2][]const u8{ .{ "esc", "close panel" }, .{ "^space", "type to agent" }, .{ "c", "comment" }, .{ "S", "send" }, .{ "?", "help" } };
         const hints: []const [2][]const u8 = if (typing) &agent_hints else if (self.panel_open.load(.acquire)) &panel_hints else if (self.mode == .diff) &diff_hints else &file_hints;
         var ub: [32]u8 = undefined;
         const ustr = if (unsent > 0) std.fmt.bufPrint(&ub, "● {d} unsent", .{unsent}) catch "" else "";
@@ -2647,7 +2653,7 @@ const App = struct {
         var leave = false;
         while (i < b.len and !leave) {
             const ch = b[i];
-            if (ch == 0x1d) {
+            if (ch == 0 or ch == 0x1d) { // ctrl+space / ctrl+] in legacy encoding
                 i += 1;
                 leave = true;
             } else if (ch == 0x1b and i + 1 < b.len and b[i + 1] == '[') {
@@ -2663,7 +2669,7 @@ const App = struct {
                 const seq = b[i .. j + 1];
                 i = j + 1;
                 if ((final == 'I' or final == 'O') and params.len == 0) continue;
-                if (isCtrlBracket(params, final)) {
+                if (isSwitchKey(params, final)) {
                     leave = true;
                 } else if (params.len > 0 and params[0] == '<' and (final == 'M' or final == 'm')) {
                     const ps = params[1..];
@@ -3023,7 +3029,7 @@ const App = struct {
             '?' => self.showHelp(),
             'f' => try self.toggleMode(),
             't' => self.talk(),
-            'i' => self.enterAgent(null),
+            'i', KEY_CSPACE => self.enterAgent(null),
             'S' => self.sendAll(),
             'e' => self.openEditor(),
             'C' => if (self.target != null) self.openPanel(!self.panel_open.load(.acquire)) else self.setMsg("no agent pane linked (launch with `! kibitz` from your agent)", .{}),
@@ -3635,9 +3641,11 @@ test "agent screen is rebuilt from a vt capture" {
     try testing.expect(m.cursor == null); // hidden by ?25l
 }
 
-test "ctrl+] is recognised in every keyboard encoding" {
-    try testing.expect(isCtrlBracket("93;5", 'u'));
-    try testing.expect(isCtrlBracket("27;5;93", '~'));
-    try testing.expect(!isCtrlBracket("93;1", 'u'));
-    try testing.expect(!isCtrlBracket("97;5", 'u'));
+test "the panel switch key is recognised in every keyboard encoding" {
+    try testing.expect(isSwitchKey("32;5", 'u'));
+    try testing.expect(isSwitchKey("27;5;32", '~'));
+    try testing.expect(isSwitchKey("93;5", 'u'));
+    try testing.expect(!isSwitchKey("32;1", 'u'));
+    try testing.expect(!isSwitchKey("32;2", 'u'));
+    try testing.expect(!isSwitchKey("97;5", 'u'));
 }
