@@ -1,0 +1,35 @@
+version: 1
+'on':
+- push
+- manual
+stages:
+- test
+- build
+jobs:
+  linux-test-build:
+    network: none
+    timeout_seconds: 900
+    resources:
+      cpu_millis: 2000
+      memory_mib: 2048
+      workspace_mib: 2048
+    variables:
+      ZIG_GLOBAL_CACHE_DIR: /workspace/.cache/zig
+    cache:
+      key: zig017-linux-v1
+      paths:
+      - .cache/zig
+      expire_days: 7
+    script:
+    - zig fmt --check src
+    - zig test src/main.zig -lc
+    - mkdir -p dist
+    - zig build-exe src/main.zig -lc -O ReleaseSafe -femit-bin=dist/kibitz
+    - ./dist/kibitz --help
+    artifacts:
+      paths:
+      - dist/kibitz
+      expire_days: 7
+      max_size_mib: 32
+      max_expanded_mib: 64
+image: harbor.taile0e885.ts.net/runtime/betta-ci-zig@sha256:a202a173d11ec664b6365d9967a47132e0d5f8028e541b7725fd0ffdca95be5f
